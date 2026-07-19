@@ -30,10 +30,28 @@ fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
-fn pipe_through_agent(bin_path: &str, content: &str) -> Option<String> {
+fn fetch_url_text(url: &str) -> Option<String> {
+    let resp = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!(
+            "try {{ (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Substring(0, [Math]::Min(5000, (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Length)) }} catch {{ '' }}", url, url
+        )])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&resp.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&str>, url_text: Option<&str>) -> Option<String> {
+    let mut prompt = format!("Process this thought concisely: {}", text_body);
+    if let Some(url) = url_text {
+        prompt.push_str(&format!("\n\nURL content: {}", url));
+    }
+    if let Some(_s) = screenshot_path {
+        prompt.push_str("\n\nA screenshot was also taken.");
+    }
     let output = std::process::Command::new(bin_path)
         .arg("--prompt")
-        .arg(format!("Summarize this thought concisely: {}", content))
+        .arg(&prompt)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -71,14 +89,6 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     } else {
         None
     }
-}
-
-fn speak_text(text: &str) {
-    let _ = std::process::Command::new("vox")
-        .arg(text)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 pub fn apply_style(ctx: &egui::Context) {
@@ -158,16 +168,16 @@ pub struct PerihelApp {
     pub captures: Vec<Capture>,
     pub agents: Vec<agents::AgentInfo>,
     pub text_input: String,
-    pub url_input: String,
     pub view: View,
     pub status_message: String,
     pub quiet_start: String,
     pub quiet_end: String,
     pub pending_count: i64,
-    pub last_screenshot_path: Option<String>,
-    pub screenshot_attached: bool,
     pub selected_agent_idx: usize,
     pub dashboard_filter: String,
+    pub settings_url: String,
+    pub screenshot_attached: bool,
+    pub last_screenshot_path: Option<String>,
 }
 
 impl PerihelApp {
@@ -192,16 +202,16 @@ impl PerihelApp {
             captures,
             agents,
             text_input: String::new(),
-            url_input: String::new(),
             view: View::Capture,
             status_message: String::new(),
             quiet_start,
             quiet_end,
             pending_count,
-            last_screenshot_path: None,
-            screenshot_attached: false,
             selected_agent_idx: 0,
             dashboard_filter: "all".into(),
+            settings_url: String::new(),
+            screenshot_attached: false,
+            last_screenshot_path: None,
         }
     }
 
@@ -238,81 +248,40 @@ impl PerihelApp {
     }
 
     fn draw_capture(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("Thought").size(13.0).color(MUTED));
-        ui.add_sized([ui.available_width(), 100.0], egui::TextEdit::multiline(&mut self.text_input)
-            .hint_text("What's on your mind?")
-            .desired_rows(5).frame(true));
-
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("URL (optional)").size(13.0).color(MUTED));
-        ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.url_input)
-            .hint_text("https://...").frame(true));
-
-        ui.add_space(10.0);
-        egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let cam = if self.screenshot_attached { "[CAM]" } else { "Screenshot" };
-                    if ui.button(cam).clicked() {
-                        let data_dir = db::get_data_dir();
-                        if let Some(path) = take_screenshot(&data_dir) {
-                            self.last_screenshot_path = Some(path);
-                            self.screenshot_attached = true;
-                            self.status_message = "Screenshot attached".into();
-                        } else {
-                            self.status_message = "Screenshot failed".into();
-                        }
-                    }
-                    if !self.text_input.trim().is_empty() && ui.button("Speak").clicked() {
-                        speak_text(self.text_input.trim());
-                    }
-                    if ui.button("Voice").clicked() {
-                        let data_dir = db::get_data_dir();
-                        self.status_message = "Recording...".into();
-                        let tx = self.cmd_tx.clone();
-                        std::thread::spawn(move || {
-                            let text = record_voice(&data_dir);
-                            let msg = match text {
-                                Some(p) => format!("Voice saved: {}", p),
-                                None => "Voice recording failed.".into(),
-                            };
-                            let _ = tx.send(AppCommand::StatusMessage(msg));
-                        });
-                    }
-                });
-            });
-
-        let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
-        if !detected.is_empty() {
-            ui.add_space(8.0);
-            egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("AI Agent:").size(13.0).color(MUTED));
-                        let names: Vec<&str> = detected.iter().map(|a| a.name.as_str()).collect();
-                        egui::ComboBox::from_id_salt("agent_sel")
-                            .selected_text(names.get(self.selected_agent_idx).copied().unwrap_or("None"))
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.selected_agent_idx, 0, "None");
-                                for (i, name) in names.iter().enumerate() {
-                                    ui.selectable_value(&mut self.selected_agent_idx, i + 1, *name);
-                                }
-                            });
-                    });
-                });
-        }
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new("What's on your mind?").size(14.0).color(MUTED));
+        ui.add_sized([ui.available_width(), 180.0], egui::TextEdit::multiline(&mut self.text_input)
+            .hint_text("Type your thought here...")
+            .desired_rows(8).frame(true));
 
         ui.add_space(12.0);
-        if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(
-            egui::RichText::new("Capture").size(15.0).color(egui::Color32::WHITE)
-        ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
-            self.do_capture();
-        }
+        ui.horizontal(|ui| {
+            if ui.add_sized([120.0, 36.0], egui::Button::new(
+                egui::RichText::new("Voice").size(13.0).color(TEXT)
+            ).fill(SURFACE).corner_radius(CornerRadius::same(6))).clicked() {
+                let data_dir = db::get_data_dir();
+                self.status_message = "Recording...".into();
+                let tx = self.cmd_tx.clone();
+                std::thread::spawn(move || {
+                    let text = record_voice(&data_dir);
+                    let msg = match text {
+                        Some(p) => format!("Voice saved: {}", p),
+                        None => "Voice recording failed.".into(),
+                    };
+                    let _ = tx.send(AppCommand::StatusMessage(msg));
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_sized([120.0, 36.0], egui::Button::new(
+                    egui::RichText::new("Capture").size(14.0).color(egui::Color32::WHITE)
+                ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
+                    self.do_capture();
+                }
+            });
+        });
 
         if !self.status_message.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.label(egui::RichText::new(&self.status_message).size(12.0).color(DIM));
         }
     }
@@ -343,7 +312,7 @@ impl PerihelApp {
                 ui.add_space(60.0);
                 ui.vertical_centered(|ui| {
                     ui.label(egui::RichText::new("No captures yet").size(15.0).color(DIM));
-                    ui.label(egui::RichText::new("Press Ctrl+Shift+P to capture").size(12.0).color(DIM));
+                    ui.label(egui::RichText::new("Type a thought and submit it").size(12.0).color(DIM));
                 });
                 return;
             }
@@ -363,15 +332,12 @@ impl PerihelApp {
                 let preview: String = capture.content.chars().take(70).collect();
                 let preview = if capture.content.chars().count() > 70 { format!("{}...", preview) } else { preview };
 
-                egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 6)), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
+                egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(220)), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(type_label).size(11.0).color(DIM));
                             ui.label(egui::RichText::new(status_label).size(11.0).color(DIM));
                             ui.add(egui::Label::new(egui::RichText::new(&preview).size(12.0)).sense(egui::Sense::click()));
-                            if ui.add(egui::Button::new(egui::RichText::new("SPK").size(11.0).color(ACCENT)).fill(SURFACE).corner_radius(CornerRadius::same(4))).clicked() {
-                                speak_text(&capture.content);
-                            }
                             if capture.status == "pending" {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.button("X").clicked() {
@@ -399,13 +365,47 @@ impl PerihelApp {
 
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Agents").size(14.0).color(ACCENT).strong());
+
+        ui.label(egui::RichText::new("AI Agent").size(14.0).color(ACCENT).strong());
         ui.add_space(4.0);
-        for agent in &self.agents {
-            if agent.detected {
-                ui.label(egui::RichText::new(format!("[OK] {} {}", agent.name, agent.version.as_deref().unwrap_or(""))).size(12.0).color(TEXT));
+        let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
+        if !detected.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Process with:").size(12.0).color(MUTED));
+                let names: Vec<&str> = detected.iter().map(|a| a.name.as_str()).collect();
+                egui::ComboBox::from_id_salt("agent_sel")
+                    .selected_text(names.get(self.selected_agent_idx).copied().unwrap_or("None"))
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.selected_agent_idx, 0, "None");
+                        for (i, name) in names.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_agent_idx, i + 1, *name);
+                        }
+                    });
+            });
+        } else {
+            ui.label(egui::RichText::new("No AI agents detected on this system.").size(12.0).color(DIM));
+        }
+
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("URL").size(14.0).color(ACCENT).strong());
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Attach a URL to your next capture. The agent will fetch and analyze it.").size(11.0).color(DIM));
+        ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.settings_url)
+            .hint_text("https://...").frame(true));
+
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("Screenshot").size(14.0).color(ACCENT).strong());
+        ui.add_space(4.0);
+        let cam_label = if self.screenshot_attached { "[CAM]" } else { "Take Screenshot" };
+        if ui.add(egui::Button::new(egui::RichText::new(cam_label).size(12.0)).corner_radius(CornerRadius::same(6))).clicked() {
+            let data_dir = db::get_data_dir();
+            if let Some(path) = take_screenshot(&data_dir) {
+                self.last_screenshot_path = Some(path);
+                self.screenshot_attached = true;
+                self.status_message = "Screenshot ready".into();
             } else {
-                ui.label(egui::RichText::new(format!("[--] {} (not found)", agent.name)).size(12.0).color(DIM));
+                self.status_message = "Screenshot failed".into();
             }
         }
 
@@ -442,61 +442,72 @@ impl PerihelApp {
         }
     }
 
-    fn do_capture(&mut self) {
-        let mut captured = false;
-        let (agent_bin, agent_name) = {
-            let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
-            if self.selected_agent_idx > 0 && self.selected_agent_idx <= detected.len() {
-                let agent = detected[self.selected_agent_idx - 1];
-                (agent.path.clone(), Some(agent.name.clone()))
-            } else { (None, None) }
-        };
-
-        if !self.text_input.is_empty() {
-            let content = self.text_input.trim().to_string();
-            let id = if let Ok(conn) = self.conn.lock() { db::insert_capture(&conn, &content, "text").ok() } else { None };
-            if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin.clone(), agent_name.clone(), id) {
-                let conn = self.conn.clone();
-                std::thread::spawn(move || {
-                    if let Some(summary) = pipe_through_agent(&bin, &content) {
-                        if let Ok(db) = conn.lock() { db::update_ai_summary(&db, cap_id, &summary, &name).ok(); }
-                    }
-                });
-            }
-            self.text_input.clear();
-            captured = true;
-        }
-
-        if !self.url_input.is_empty() {
-            let content = self.url_input.trim().to_string();
-            let id = if let Ok(conn) = self.conn.lock() { db::insert_capture(&conn, &content, "url").ok() } else { None };
-            if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin.clone(), agent_name.clone(), id) {
-                let conn = self.conn.clone();
-                std::thread::spawn(move || {
-                    if let Some(summary) = pipe_through_agent(&bin, &content) {
-                        if let Ok(db) = conn.lock() { db::update_ai_summary(&db, cap_id, &summary, &name).ok(); }
-                    }
-                });
-            }
-            self.url_input.clear();
-            captured = true;
-        }
-
-        if self.screenshot_attached {
-            if let Some(ref path) = self.last_screenshot_path {
-                if let Ok(conn) = self.conn.lock() { db::insert_capture(&conn, path, "screenshot").ok(); }
-            }
-            self.screenshot_attached = false;
-            self.last_screenshot_path = None;
-            captured = true;
-        }
-
-        if captured {
-            self.status_message = "Captured!".into();
-            self.refresh_captures();
+    fn get_agent_bin_and_name(&self) -> (Option<String>, Option<String>) {
+        let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
+        if self.selected_agent_idx > 0 && self.selected_agent_idx <= detected.len() {
+            let agent = detected[self.selected_agent_idx - 1];
+            (agent.path.clone(), Some(agent.name.clone()))
         } else {
-            self.status_message = "Type something or attach a screenshot.".into();
+            (None, None)
         }
+    }
+
+    fn do_capture(&mut self) {
+        let text = self.text_input.trim().to_string();
+        if text.is_empty() {
+            self.status_message = "Type something first.".into();
+            return;
+        }
+
+        let url_to_capture = self.settings_url.trim().to_string();
+        let screenshot_path = self.last_screenshot_path.take();
+        let has_screenshot = screenshot_path.is_some();
+        let (agent_bin, agent_name) = self.get_agent_bin_and_name();
+
+        // Save the text capture
+        let id = if let Ok(conn) = self.conn.lock() {
+            db::insert_capture(&conn, &text, "text").ok()
+        } else { None };
+
+        // Save URL too if set
+        if !url_to_capture.is_empty() {
+            if let Ok(conn) = self.conn.lock() {
+                db::insert_capture(&conn, &url_to_capture, "url").ok();
+            }
+        }
+
+        // Save screenshot if attached
+        if has_screenshot {
+            if let Some(ref path) = screenshot_path {
+                if let Ok(conn) = self.conn.lock() {
+                    db::insert_capture(&conn, path, "screenshot").ok();
+                }
+            }
+        }
+
+        // Background agent processing
+        if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin, agent_name, id) {
+            let conn = self.conn.clone();
+            let text_for_agent = text.clone();
+            let url_text = if !url_to_capture.is_empty() {
+                fetch_url_text(&url_to_capture)
+            } else {
+                None
+            };
+            let screen = screenshot_path.clone();
+            std::thread::spawn(move || {
+                let summary = pipe_through_agent(&bin, &text_for_agent, screen.as_deref(), url_text.as_deref());
+                if let Some(s) = summary {
+                    if let Ok(db) = conn.lock() { db::update_ai_summary(&db, cap_id, &s, &name).ok(); }
+                }
+            });
+        }
+
+        self.text_input.clear();
+        self.screenshot_attached = false;
+        self.settings_url.clear();
+        self.status_message = "Captured!".into();
+        self.refresh_captures();
     }
 
     pub fn refresh_captures(&mut self) {
