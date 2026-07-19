@@ -92,6 +92,7 @@ pub struct PerihelApp {
     pub last_screenshot_path: Option<String>,
     pub screenshot_attached: bool,
     pub selected_agent_idx: usize,
+    pub dashboard_filter: String,
 }
 
 impl PerihelApp {
@@ -106,7 +107,7 @@ impl PerihelApp {
             }).collect::<Vec<_>>()).ok();
         }
 
-        let captures = db::get_pending_captures(&conn.lock().unwrap()).unwrap_or_default();
+        let captures = db::get_all_captures(&conn.lock().unwrap()).unwrap_or_default();
         let pending_count = db::get_pending_count(&conn.lock().unwrap()).unwrap_or(0);
         let quiet_start = db::get_setting(&conn.lock().unwrap(), "quiet_start").unwrap_or(Some("23:00".into())).unwrap_or("23:00".into());
         let quiet_end = db::get_setting(&conn.lock().unwrap(), "quiet_end").unwrap_or(Some("08:00".into())).unwrap_or("08:00".into());
@@ -129,6 +130,7 @@ impl PerihelApp {
             last_screenshot_path: None,
             screenshot_attached: false,
             selected_agent_idx: 0,
+            dashboard_filter: "all".into(),
         }
     }
 
@@ -220,12 +222,29 @@ impl PerihelApp {
             .id(egui::Id::new("dashboard"))
             .default_size([500.0, 400.0])
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.dashboard_filter, "all".into(), "All");
+                    ui.selectable_value(&mut self.dashboard_filter, "pending".into(), "Pending");
+                    ui.selectable_value(&mut self.dashboard_filter, "done".into(), "Done");
+                    ui.selectable_value(&mut self.dashboard_filter, "dismissed".into(), "Dismissed");
+                });
+                ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.captures.is_empty() {
+                    let filtered: Vec<Capture> = if self.dashboard_filter == "all" {
+                        self.captures.clone()
+                    } else {
+                        self.captures.iter().filter(|c| c.status == self.dashboard_filter).cloned().collect()
+                    };
+
+                    if filtered.is_empty() {
                         ui.label("No captures yet. Press Ctrl+Shift+P to capture something.");
                         return;
                     }
-                    for capture in self.captures.clone() {
+
+                    ui.label(format!("{} capture(s)", filtered.len()));
+                    ui.add_space(4.0);
+
+                    for capture in &filtered {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 let type_icon = match capture.content_type.as_str() {
@@ -235,28 +254,39 @@ impl PerihelApp {
                                     _ => "📝",
                                 };
                                 ui.label(type_icon);
+                                let status_label = match capture.status.as_str() {
+                                    "done" => "✓",
+                                    "dismissed" => "✗",
+                                    _ => "○",
+                                };
+                                ui.label(status_label);
                                 let preview = if capture.content.len() > 60 {
                                     format!("{}...", &capture.content[..60])
                                 } else {
                                     capture.content.clone()
                                 };
                                 ui.label(&preview);
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Done").clicked() {
-                                        if let Ok(conn) = self.conn.lock() {
-                                            db::update_status(&conn, capture.id, "done").ok();
+                                if capture.status == "pending" {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Done").clicked() {
+                                            if let Ok(conn) = self.conn.lock() {
+                                                db::update_status(&conn, capture.id, "done").ok();
+                                            }
+                                            self.refresh_captures();
                                         }
-                                        self.refresh_captures();
-                                    }
-                                    if ui.button("Dismiss").clicked() {
-                                        if let Ok(conn) = self.conn.lock() {
-                                            db::update_status(&conn, capture.id, "dismissed").ok();
+                                        if ui.button("Dismiss").clicked() {
+                                            if let Ok(conn) = self.conn.lock() {
+                                                db::update_status(&conn, capture.id, "dismissed").ok();
+                                            }
+                                            self.refresh_captures();
                                         }
-                                        self.refresh_captures();
-                                    }
-                                });
+                                    });
+                                }
                             });
-                            if let Some(summary) = &capture.ai_summary {
+                            if let Some(ref agent) = capture.agent_used {
+                                ui.label(format!("via {}", agent));
+                            }
+                            if let Some(ref summary) = capture.ai_summary {
                                 ui.label(format!("AI: {}", summary));
                             }
                         });
@@ -298,6 +328,20 @@ impl PerihelApp {
                         }
                     }
                 });
+
+                ui.add_space(10.0);
+                ui.heading("Export");
+                if ui.button("Export captures as JSON").clicked() {
+                    let data_dir = db::get_data_dir();
+                    let path = data_dir.join("perihel_export.json");
+                    if let Ok(conn) = self.conn.lock() {
+                        if let Ok(captures) = db::get_all_captures(&conn) {
+                            let json = serde_json::to_string_pretty(&captures).unwrap_or_default();
+                            std::fs::write(&path, json).ok();
+                            self.status_message = format!("Exported to {}", path.display());
+                        }
+                    }
+                }
             });
     }
 
@@ -365,7 +409,7 @@ impl PerihelApp {
 
     pub fn refresh_captures(&mut self) {
         if let Ok(conn) = self.conn.lock() {
-            self.captures = db::get_pending_captures(&conn).unwrap_or_default();
+            self.captures = db::get_all_captures(&conn).unwrap_or_default();
             self.pending_count = db::get_pending_count(&conn).unwrap_or(0);
         }
     }

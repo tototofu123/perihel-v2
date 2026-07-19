@@ -13,6 +13,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
 
 pub enum AppCommand {
     ShowWindow,
+    HideWindow,
     Quit,
     ShowCapture,
     ShowDashboard,
@@ -47,7 +48,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             let tray = setup_tray(cc, cmd_tx.clone());
             let _hotkey = setup_hotkey(cmd_tx.clone());
-            Ok(Box::new(PerihelRunner { app, _tray: tray }))
+            Ok(Box::new(PerihelRunner { app, _tray: tray, was_focused: false }))
         }),
     )
 }
@@ -55,6 +56,7 @@ fn main() -> eframe::Result {
 struct PerihelRunner {
     app: PerihelApp,
     _tray: TrayIcon,
+    was_focused: bool,
 }
 
 impl eframe::App for PerihelRunner {
@@ -64,6 +66,12 @@ impl eframe::App for PerihelRunner {
                 AppCommand::ShowWindow | AppCommand::ShowCapture => {
                     self.app.show_capture = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                AppCommand::HideWindow => {
+                    self.app.show_capture = false;
+                    self.app.dashboard_open = false;
+                    self.app.settings_open = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 AppCommand::ShowDashboard => {
                     self.app.dashboard_open = true;
@@ -82,6 +90,16 @@ impl eframe::App for PerihelRunner {
             }
         }
 
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        if !focused && self.was_focused {
+            // Auto-hide all popups when focus is lost
+            self.app.show_capture = false;
+            self.app.dashboard_open = false;
+            self.app.settings_open = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        self.was_focused = focused;
+
         if self.app.dashboard_open {
             self.app.show_dashboard(ctx);
         }
@@ -99,12 +117,14 @@ fn setup_tray(_cc: &eframe::CreationContext<'_>, cmd_tx: mpsc::Sender<AppCommand
     let capture_item = MenuItem::with_id("capture", "New Capture", true, None);
     let dashboard_item = MenuItem::with_id("dashboard", "Dashboard", true, None);
     let settings_item = MenuItem::with_id("settings", "Settings", true, None);
-    let quit_item = MenuItem::with_id("quit", "Quit", true, None);
+    let separator_item = MenuItem::with_id("sep", "", false, None);
+    let exit_item = MenuItem::with_id("exit", "Exit", true, None);
 
     tray_menu.append(&capture_item).ok();
     tray_menu.append(&dashboard_item).ok();
     tray_menu.append(&settings_item).ok();
-    tray_menu.append(&quit_item).ok();
+    tray_menu.append(&separator_item).ok();
+    tray_menu.append(&exit_item).ok();
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
@@ -121,7 +141,7 @@ fn setup_tray(_cc: &eframe::CreationContext<'_>, cmd_tx: mpsc::Sender<AppCommand
                     "capture" => cmd_tx.send(AppCommand::ShowCapture).ok(),
                     "dashboard" => cmd_tx.send(AppCommand::ShowDashboard).ok(),
                     "settings" => cmd_tx.send(AppCommand::ShowSettings).ok(),
-                    "quit" => cmd_tx.send(AppCommand::Quit).ok(),
+                    "exit" => cmd_tx.send(AppCommand::Quit).ok(),
                     _ => None,
                 };
             }

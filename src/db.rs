@@ -206,6 +206,30 @@ pub fn get_detected_agents(conn: &Connection) -> Result<Vec<DetectedAgent>> {
     Ok(agents)
 }
 
+pub fn get_all_captures(conn: &Connection) -> Result<Vec<Capture>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
+         FROM captures ORDER BY created_at DESC"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Capture {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            content_type: row.get(2)?,
+            status: row.get(3)?,
+            created_at: row.get(4)?,
+            scheduled_at: row.get(5)?,
+            ai_summary: row.get(6)?,
+            agent_used: row.get(7)?,
+        })
+    })?;
+    let mut captures = Vec::new();
+    for row in rows {
+        captures.push(row?);
+    }
+    Ok(captures)
+}
+
 pub fn get_pending_count(conn: &Connection) -> Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM captures WHERE status = 'pending'",
