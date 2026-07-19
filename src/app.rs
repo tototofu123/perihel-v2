@@ -9,8 +9,14 @@ use crate::db::{self, Capture};
 
 use super::AppCommand;
 
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 200, 220);
-const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(74, 222, 128);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 140, 200);
+const BG: egui::Color32 = egui::Color32::from_rgb(240, 240, 245);
+const CARD: egui::Color32 = egui::Color32::from_rgb(255, 255, 255);
+const TEXT: egui::Color32 = egui::Color32::from_gray(30);
+const MUTED: egui::Color32 = egui::Color32::from_gray(100);
+const DIM: egui::Color32 = egui::Color32::from_gray(120);
+const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(0, 150, 80);
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(230, 230, 238);
 
 fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
     let screenshots_dir = data_dir.join("screenshots");
@@ -77,76 +83,72 @@ fn speak_text(text: &str) {
 
 pub fn apply_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    let cr6 = CornerRadius::same(6);
+    let cr = CornerRadius::same(6);
     style.visuals = egui::Visuals {
-        dark_mode: true,
-        override_text_color: Some(egui::Color32::from_gray(210)),
-        window_corner_radius: CornerRadius::same(10),
-        window_shadow: egui::Shadow {
-            offset: [0, 4].into(),
-            blur: 16,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(60),
-        },
-        window_fill: egui::Color32::from_rgb(20, 20, 30),
-        window_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 10)),
-        panel_fill: egui::Color32::from_rgb(16, 16, 24),
-        faint_bg_color: egui::Color32::from_rgb(26, 26, 38),
-        extreme_bg_color: egui::Color32::from_rgb(12, 12, 18),
-        code_bg_color: egui::Color32::from_rgb(26, 26, 38),
+        dark_mode: false,
+        override_text_color: Some(TEXT),
+        window_fill: BG,
+        panel_fill: BG,
+        faint_bg_color: CARD,
+        extreme_bg_color: SURFACE,
         hyperlink_color: ACCENT,
         selection: egui::style::Selection {
-            bg_fill: ACCENT.linear_multiply(0.3),
+            bg_fill: ACCENT.linear_multiply(0.2),
             stroke: egui::Stroke::new(1.0_f32, ACCENT),
         },
         widgets: egui::style::Widgets {
             noninteractive: egui::style::WidgetVisuals {
-                bg_fill: egui::Color32::from_rgb(26, 26, 38),
-                weak_bg_fill: egui::Color32::from_rgb(20, 20, 32),
-                bg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 6)),
-                corner_radius: cr6,
-                fg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(160)),
+                bg_fill: CARD,
+                weak_bg_fill: SURFACE,
+                bg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(200)),
+                corner_radius: cr,
+                fg_stroke: egui::Stroke::new(1.0_f32, MUTED),
                 expansion: 0.0,
             },
             inactive: egui::style::WidgetVisuals {
-                bg_fill: egui::Color32::from_rgb(30, 30, 44),
-                weak_bg_fill: egui::Color32::from_rgb(26, 26, 38),
-                bg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 12)),
-                corner_radius: cr6,
-                fg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(180)),
+                bg_fill: CARD,
+                weak_bg_fill: SURFACE,
+                bg_stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(210)),
+                corner_radius: cr,
+                fg_stroke: egui::Stroke::new(1.0_f32, TEXT),
                 expansion: 0.0,
             },
             hovered: egui::style::WidgetVisuals {
-                bg_fill: egui::Color32::from_rgb(38, 38, 56),
-                weak_bg_fill: egui::Color32::from_rgb(34, 34, 50),
-                bg_stroke: egui::Stroke::new(1.0_f32, ACCENT.linear_multiply(0.5)),
-                corner_radius: cr6,
-                fg_stroke: egui::Stroke::new(1.5_f32, egui::Color32::from_gray(220)),
+                bg_fill: egui::Color32::from_rgb(220, 225, 240),
+                weak_bg_fill: egui::Color32::from_rgb(215, 220, 235),
+                bg_stroke: egui::Stroke::new(1.0_f32, ACCENT),
+                corner_radius: cr,
+                fg_stroke: egui::Stroke::new(1.5_f32, TEXT),
                 expansion: 1.0,
             },
             active: egui::style::WidgetVisuals {
-                bg_fill: ACCENT.linear_multiply(0.2),
-                weak_bg_fill: ACCENT.linear_multiply(0.15),
+                bg_fill: ACCENT.linear_multiply(0.15),
+                weak_bg_fill: ACCENT.linear_multiply(0.1),
                 bg_stroke: egui::Stroke::new(1.0_f32, ACCENT),
-                corner_radius: cr6,
-                fg_stroke: egui::Stroke::new(2.0_f32, egui::Color32::from_gray(240)),
+                corner_radius: cr,
+                fg_stroke: egui::Stroke::new(2.0_f32, TEXT),
                 expansion: 1.0,
             },
             open: egui::style::WidgetVisuals {
-                bg_fill: egui::Color32::from_rgb(34, 34, 50),
-                weak_bg_fill: egui::Color32::from_rgb(30, 30, 44),
+                bg_fill: CARD,
+                weak_bg_fill: SURFACE,
                 bg_stroke: egui::Stroke::new(1.0_f32, ACCENT.linear_multiply(0.3)),
-                corner_radius: cr6,
-                fg_stroke: egui::Stroke::new(1.5_f32, egui::Color32::from_gray(200)),
+                corner_radius: cr,
+                fg_stroke: egui::Stroke::new(1.5_f32, TEXT),
                 expansion: 0.0,
             },
         },
         ..Default::default()
     };
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-    style.spacing.button_padding = egui::vec2(16.0, 6.0);
-    style.spacing.indent = 16.0;
+    style.spacing.button_padding = egui::vec2(14.0, 5.0);
     ctx.set_style(style);
+}
+
+pub enum View {
+    Capture,
+    Dashboard,
+    Settings,
 }
 
 pub struct PerihelApp {
@@ -157,9 +159,7 @@ pub struct PerihelApp {
     pub agents: Vec<agents::AgentInfo>,
     pub text_input: String,
     pub url_input: String,
-    pub show_capture: bool,
-    pub dashboard_open: bool,
-    pub settings_open: bool,
+    pub view: View,
     pub status_message: String,
     pub quiet_start: String,
     pub quiet_end: String,
@@ -187,15 +187,13 @@ impl PerihelApp {
         let quiet_end = conn.lock().ok().and_then(|c| db::get_setting(&c, "quiet_end").ok()).flatten().unwrap_or("08:00".into());
         Self {
             conn,
-            cmd_rx: cmd_rx,
+            cmd_rx,
             cmd_tx,
             captures,
             agents,
             text_input: String::new(),
             url_input: String::new(),
-            show_capture: false,
-            dashboard_open: false,
-            settings_open: false,
+            view: View::Capture,
             status_message: String::new(),
             quiet_start,
             quiet_end,
@@ -207,40 +205,53 @@ impl PerihelApp {
         }
     }
 
-    pub fn show_capture_popup(&mut self, ctx: &egui::Context) {
-        egui::Window::new("capture_window")
-            .id(egui::Id::new("capture_popup"))
-            .resizable(false)
-            .collapsible(false)
-            .title_bar(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .fixed_size([340.0, 310.0])
-            .frame(egui::Frame {
-                fill: egui::Color32::from_rgb(42, 42, 60),
-                corner_radius: CornerRadius::same(12),
-                shadow: egui::Shadow { offset: [0, 8].into(), blur: 32, spread: 0, color: egui::Color32::from_black_alpha(160) },
-                stroke: egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 40)),
-                inner_margin: egui::Margin::symmetric(20, 16),
-                ..Default::default()
-            })
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("New Capture").size(18.0).color(ACCENT).strong());
-                });
-                ui.add_space(12.0);
+    pub fn show_content(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.draw_tabs(ui);
+            ui.separator();
+            match self.view {
+                View::Capture => self.draw_capture(ui),
+                View::Dashboard => self.draw_dashboard(ui),
+                View::Settings => self.draw_settings(ui),
+            }
+        });
+    }
 
-                ui.label(egui::RichText::new("Thought").size(12.0).color(egui::Color32::from_gray(140)));
-                ui.add_sized([300.0, 80.0], egui::TextEdit::multiline(&mut self.text_input)
-                    .hint_text("What's on your mind?")
-                    .desired_rows(4).frame(true));
+    fn draw_tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let views = [("Capture", View::Capture), ("Dashboard", View::Dashboard), ("Settings", View::Settings)];
+            for (label, v) in &views {
+                let is_active = matches!(&self.view, v if std::mem::discriminant(v) == std::mem::discriminant(&self.view));
+                let mut btn = egui::Button::new(egui::RichText::new(*label).size(14.0));
+                if is_active {
+                    btn = btn.fill(ACCENT.linear_multiply(0.3));
+                    btn = btn.stroke(egui::Stroke::new(1.0_f32, ACCENT));
+                }
+                if ui.add(btn).clicked() {
+                    self.view = View::Capture;
+                    if let View::Capture = v { self.view = View::Capture; }
+                    if let View::Dashboard = v { self.view = View::Dashboard; }
+                    if let View::Settings = v { self.view = View::Settings; }
+                }
+            }
+        });
+    }
 
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("URL (optional)").size(12.0).color(egui::Color32::from_gray(140)));
-                ui.add_sized([300.0, 24.0], egui::TextEdit::singleline(&mut self.url_input)
-                    .hint_text("https://...").frame(true));
+    fn draw_capture(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Thought").size(13.0).color(MUTED));
+        ui.add_sized([ui.available_width(), 100.0], egui::TextEdit::multiline(&mut self.text_input)
+            .hint_text("What's on your mind?")
+            .desired_rows(5).frame(true));
 
-                ui.add_space(10.0);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("URL (optional)").size(13.0).color(MUTED));
+        ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.url_input)
+            .hint_text("https://...").frame(true));
 
+        ui.add_space(10.0);
+        egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let cam = if self.screenshot_attached { "[CAM]" } else { "Screenshot" };
                     if ui.button(cam).clicked() {
@@ -253,10 +264,8 @@ impl PerihelApp {
                             self.status_message = "Screenshot failed".into();
                         }
                     }
-                    if !self.text_input.trim().is_empty() {
-                        if ui.button("Speak").clicked() {
-                            speak_text(self.text_input.trim());
-                        }
+                    if !self.text_input.trim().is_empty() && ui.button("Speak").clicked() {
+                        speak_text(self.text_input.trim());
                     }
                     if ui.button("Voice").clicked() {
                         let data_dir = db::get_data_dir();
@@ -272,201 +281,165 @@ impl PerihelApp {
                         });
                     }
                 });
+            });
 
-                let detected_agents: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
-                if !detected_agents.is_empty() {
-                    ui.add_space(8.0);
+        let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
+        if !detected.is_empty() {
+            ui.add_space(8.0);
+            egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Agent:").size(12.0).color(egui::Color32::from_gray(140)));
-                        let agent_names: Vec<&str> = detected_agents.iter().map(|a| a.name.as_str()).collect();
-                        egui::ComboBox::from_id_salt("agent_selector")
-                            .selected_text(agent_names.get(self.selected_agent_idx).copied().unwrap_or("None"))
+                        ui.label(egui::RichText::new("AI Agent:").size(13.0).color(MUTED));
+                        let names: Vec<&str> = detected.iter().map(|a| a.name.as_str()).collect();
+                        egui::ComboBox::from_id_salt("agent_sel")
+                            .selected_text(names.get(self.selected_agent_idx).copied().unwrap_or("None"))
                             .width(180.0)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.selected_agent_idx, 0, "None");
-                                for (i, name) in agent_names.iter().enumerate() {
+                                for (i, name) in names.iter().enumerate() {
                                     ui.selectable_value(&mut self.selected_agent_idx, i + 1, *name);
                                 }
                             });
                     });
-                    ui.add_space(6.0);
-                }
+                });
+        }
 
-                ui.add_space(6.0);
-                if ui.add_sized([300.0, 36.0], egui::Button::new(
-                    egui::RichText::new("Capture").size(14.0).color(egui::Color32::from_gray(240))
-                ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
-                    self.do_capture();
-                }
+        ui.add_space(12.0);
+        if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(
+            egui::RichText::new("Capture").size(15.0).color(egui::Color32::WHITE)
+        ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
+            self.do_capture();
+        }
 
-                if !self.status_message.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(&self.status_message).size(11.0).color(egui::Color32::from_gray(150)));
-                }
-            });
+        if !self.status_message.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&self.status_message).size(12.0).color(DIM));
+        }
     }
 
-    pub fn show_dashboard(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Dashboard")
-            .id(egui::Id::new("dashboard"))
-            .default_size([520.0, 440.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (key, label) in &[("all", "All"), ("pending", "Pending"), ("done", "Done"), ("dismissed", "Dismissed")] {
-                        let selected = self.dashboard_filter == *key;
-                        let mut btn = egui::Button::new(egui::RichText::new(*label).size(12.0))
-                            .corner_radius(CornerRadius::same(6));
-                        if selected {
-                            btn = btn.fill(ACCENT.linear_multiply(0.25));
-                            btn = btn.stroke(egui::Stroke::new(1.0_f32, ACCENT));
-                        }
-                        if ui.add(btn).clicked() {
-                            self.dashboard_filter = key.to_string();
-                        }
-                    }
-                });
+    fn draw_dashboard(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for (key, label) in &[("all", "All"), ("pending", "Pending"), ("done", "Done"), ("dismissed", "Dismissed")] {
+                let selected = self.dashboard_filter == *key;
+                let mut btn = egui::Button::new(egui::RichText::new(*label).size(12.0)).corner_radius(CornerRadius::same(6));
+                if selected { btn = btn.fill(ACCENT.linear_multiply(0.3)).stroke(egui::Stroke::new(1.0_f32, ACCENT)); }
+                if ui.add(btn).clicked() { self.dashboard_filter = key.to_string(); }
+            }
+        });
 
-                let filtered: Vec<Capture> = if self.dashboard_filter == "all" {
-                    self.captures.clone()
-                } else {
-                    self.captures.iter().filter(|c| c.status == self.dashboard_filter).cloned().collect()
+        let filtered: Vec<Capture> = if self.dashboard_filter == "all" {
+            self.captures.clone()
+        } else {
+            self.captures.iter().filter(|c| c.status == self.dashboard_filter).cloned().collect()
+        };
+
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(format!("{} capture{}", filtered.len(), if filtered.len() == 1 { "" } else { "s" })).size(12.0).color(DIM));
+        ui.separator();
+
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if filtered.is_empty() {
+                ui.add_space(60.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("No captures yet").size(15.0).color(DIM));
+                    ui.label(egui::RichText::new("Press Ctrl+Shift+P to capture").size(12.0).color(DIM));
+                });
+                return;
+            }
+
+            for capture in &filtered {
+                let status_label = match capture.status.as_str() {
+                    "done" => "[v]",
+                    "dismissed" => "[x]",
+                    _ => "[o]",
                 };
+                let type_label = match capture.content_type.as_str() {
+                    "url" => "[URL]",
+                    "screenshot" => "[IMG]",
+                    "voice" => "[AUDIO]",
+                    _ => "[TEXT]",
+                };
+                let preview: String = capture.content.chars().take(70).collect();
+                let preview = if capture.content.chars().count() > 70 { format!("{}...", preview) } else { preview };
 
+                egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 6)), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(type_label).size(11.0).color(DIM));
+                            ui.label(egui::RichText::new(status_label).size(11.0).color(DIM));
+                            ui.add(egui::Label::new(egui::RichText::new(&preview).size(12.0)).sense(egui::Sense::click()));
+                            if ui.add(egui::Button::new(egui::RichText::new("SPK").size(11.0).color(ACCENT)).fill(SURFACE).corner_radius(CornerRadius::same(4))).clicked() {
+                                speak_text(&capture.content);
+                            }
+                            if capture.status == "pending" {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("X").clicked() {
+                                        if let Ok(conn) = self.conn.lock() { db::update_status(&conn, capture.id, "dismissed").ok(); }
+                                        self.refresh_captures();
+                                    }
+                                    if ui.add(egui::Button::new(egui::RichText::new("OK").size(11.0).color(DONE_GREEN)).fill(DONE_GREEN.linear_multiply(0.2)).corner_radius(CornerRadius::same(4))).clicked() {
+                                        if let Ok(conn) = self.conn.lock() { db::update_status(&conn, capture.id, "done").ok(); }
+                                        self.refresh_captures();
+                                    }
+                                });
+                            }
+                        });
+                        if let Some(ref agent) = capture.agent_used {
+                            ui.label(egui::RichText::new(format!("via {}", agent)).size(10.0).color(DIM));
+                        }
+                        if let Some(ref summary) = capture.ai_summary {
+                            ui.label(egui::RichText::new(summary).size(11.0).color(MUTED).italics());
+                        }
+                    });
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(format!("{} capture{}", filtered.len(),
-                    if filtered.len() == 1 { "" } else { "s" })).size(11.0).color(egui::Color32::from_gray(130)));
-                ui.separator();
-
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if filtered.is_empty() {
-                        ui.add_space(40.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("No captures yet").size(14.0).color(egui::Color32::from_gray(120)));
-                            ui.label(egui::RichText::new("Press Ctrl+Shift+P to capture").size(12.0).color(egui::Color32::from_gray(100)));
-                        });
-                        return;
-                    }
-
-                    for capture in &filtered {
-                        let (_status_color, status_label) = match capture.status.as_str() {
-                            "done" => (DONE_GREEN, "[v]"),
-                            "dismissed" => (egui::Color32::from_gray(100), "[x]"),
-                            _ => (ACCENT, "[o]"),
-                        };
-                        let type_label = match capture.content_type.as_str() {
-                            "url" => "[URL]",
-                            "screenshot" => "[IMG]",
-                            "voice" => "[AUDIO]",
-                            _ => "[TEXT]",
-                        };
-                        let preview: String = capture.content.chars().take(60).collect();
-                        let preview = if capture.content.chars().count() > 60 {
-                            format!("{}...", preview)
-                        } else {
-                            preview
-                        };
-
-                        egui::Frame {
-                            fill: ctx.style().visuals.faint_bg_color,
-                            corner_radius: CornerRadius::same(8),
-                            stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 5)),
-                            inner_margin: egui::Margin::symmetric(10, 8),
-                            ..Default::default()
-                        }.show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(type_label);
-                                ui.label(status_label);
-                                ui.add(egui::Label::new(egui::RichText::new(&preview).size(12.0)).sense(egui::Sense::click()));
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("SPK").size(12.0).color(ACCENT)
-                                ).fill(egui::Color32::from_rgb(40, 40, 60)).corner_radius(CornerRadius::same(4))).clicked() {
-                                    speak_text(&capture.content);
-                                }
-                                if capture.status == "pending" {
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("X").clicked() {
-                                            if let Ok(conn) = self.conn.lock() {
-                                                db::update_status(&conn, capture.id, "dismissed").ok();
-                                            }
-                                            self.refresh_captures();
-                                        }
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new("OK").size(12.0).color(DONE_GREEN)
-                                        ).fill(DONE_GREEN.linear_multiply(0.2)).corner_radius(CornerRadius::same(4))).clicked() {
-                                            if let Ok(conn) = self.conn.lock() {
-                                                db::update_status(&conn, capture.id, "done").ok();
-                                            }
-                                            self.refresh_captures();
-                                        }
-                                    });
-                                }
-                            });
-                            if let Some(ref agent) = capture.agent_used {
-                                ui.add_space(2.0);
-                                ui.label(egui::RichText::new(format!("via {}", agent)).size(10.0).color(egui::Color32::from_gray(130)));
-                            }
-                            if let Some(ref summary) = capture.ai_summary {
-                                ui.add_space(2.0);
-                                ui.label(egui::RichText::new(summary).size(11.0).color(egui::Color32::from_gray(150)).italics());
-                            }
-                        });
-                        ui.add_space(4.0);
-                    }
-                });
-            });
+            }
+        });
     }
 
-    pub fn show_settings(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Settings")
-            .id(egui::Id::new("settings"))
-            .default_size([380.0, 360.0])
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new("Agents").size(14.0).color(ACCENT).strong());
-                ui.add_space(4.0);
-                for agent in &self.agents {
-                    if agent.detected {
-                        ui.label(egui::RichText::new(format!("[OK] {} {}", agent.name, agent.version.as_deref().unwrap_or("")))
-                            .size(12.0).color(egui::Color32::from_gray(190)));
-                    } else {
-                        ui.label(egui::RichText::new(format!("[--] {} (not found)", agent.name))
-                            .size(12.0).color(egui::Color32::from_gray(110)));
-                    }
-                }
+    fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Agents").size(14.0).color(ACCENT).strong());
+        ui.add_space(4.0);
+        for agent in &self.agents {
+            if agent.detected {
+                ui.label(egui::RichText::new(format!("[OK] {} {}", agent.name, agent.version.as_deref().unwrap_or(""))).size(12.0).color(TEXT));
+            } else {
+                ui.label(egui::RichText::new(format!("[--] {} (not found)", agent.name)).size(12.0).color(DIM));
+            }
+        }
 
-                ui.add_space(16.0);
-                ui.label(egui::RichText::new("Quiet Hours").size(14.0).color(ACCENT).strong());
-                ui.add_space(4.0);
-                let muted = egui::Color32::from_gray(140);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Start:").size(12.0).color(muted));
-                    ui.add(egui::TextEdit::singleline(&mut self.quiet_start).desired_width(50.0).frame(true));
-                    ui.label(egui::RichText::new("End:").size(12.0).color(muted));
-                    ui.add(egui::TextEdit::singleline(&mut self.quiet_end).desired_width(50.0).frame(true));
-                });
-                if self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':'
-                    && self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':' {
-                    if let Ok(conn) = self.conn.lock() {
-                        db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
-                        db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
-                    }
-                }
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("Quiet Hours").size(14.0).color(ACCENT).strong());
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Start:").size(12.0).color(MUTED));
+            ui.add(egui::TextEdit::singleline(&mut self.quiet_start).desired_width(50.0).frame(true));
+            ui.label(egui::RichText::new("End:").size(12.0).color(MUTED));
+            ui.add(egui::TextEdit::singleline(&mut self.quiet_end).desired_width(50.0).frame(true));
+        });
+        if self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':'
+            && self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':' {
+            if let Ok(conn) = self.conn.lock() {
+                db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
+                db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
+            }
+        }
 
-                ui.add_space(16.0);
-                ui.label(egui::RichText::new("Data").size(14.0).color(ACCENT).strong());
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new(egui::RichText::new("Export as JSON").size(12.0))
-                    .corner_radius(CornerRadius::same(6))).clicked() {
-                    let data_dir = db::get_data_dir();
-                    let path = data_dir.join("perihel_export.json");
-                    if let Ok(conn) = self.conn.lock() {
-                        if let Ok(captures) = db::get_all_captures(&conn) {
-                            let json = serde_json::to_string_pretty(&captures).unwrap_or_default();
-                            std::fs::write(&path, json).ok();
-                            self.status_message = format!("Exported to {}", path.display());
-                        }
-                    }
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("Data").size(14.0).color(ACCENT).strong());
+        ui.add_space(4.0);
+        if ui.add(egui::Button::new(egui::RichText::new("Export as JSON").size(12.0)).corner_radius(CornerRadius::same(6))).clicked() {
+            let data_dir = db::get_data_dir();
+            let path = data_dir.join("perihel_export.json");
+            if let Ok(conn) = self.conn.lock() {
+                if let Ok(captures) = db::get_all_captures(&conn) {
+                    let json = serde_json::to_string_pretty(&captures).unwrap_or_default();
+                    std::fs::write(&path, json).ok();
+                    self.status_message = format!("Exported to {}", path.display());
                 }
-            });
+            }
+        }
     }
 
     fn do_capture(&mut self) {

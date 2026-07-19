@@ -31,7 +31,7 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 600.0])
+            .with_inner_size([420.0, 580.0])
             .with_visible(false),
         ..Default::default()
     };
@@ -65,21 +65,18 @@ impl eframe::App for PerihelRunner {
         while let Ok(cmd) = self.app.cmd_rx.try_recv() {
             match cmd {
                 AppCommand::ShowWindow | AppCommand::ShowCapture => {
-                    self.app.show_capture = true;
+                    self.app.view = app::View::Capture;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::HideWindow => {
-                    self.app.show_capture = false;
-                    self.app.dashboard_open = false;
-                    self.app.settings_open = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
                 AppCommand::ShowDashboard => {
-                    self.app.dashboard_open = true;
+                    self.app.view = app::View::Dashboard;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::ShowSettings => {
-                    self.app.settings_open = true;
+                    self.app.view = app::View::Settings;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::Quit => {
@@ -93,23 +90,11 @@ impl eframe::App for PerihelRunner {
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if !focused && self.was_focused {
-            // Auto-hide all popups when focus is lost
-            self.app.show_capture = false;
-            self.app.dashboard_open = false;
-            self.app.settings_open = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         self.was_focused = focused;
 
-        if self.app.dashboard_open {
-            self.app.show_dashboard(ctx);
-        }
-        if self.app.settings_open {
-            self.app.show_settings(ctx);
-        }
-        if self.app.show_capture {
-            self.app.show_capture_popup(ctx);
-        }
+        self.app.show_content(ctx);
     }
 }
 
