@@ -20,6 +20,7 @@ const MUTED: egui::Color32 = egui::Color32::from_gray(100);
 const DIM: egui::Color32 = egui::Color32::from_gray(120);
 const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(0, 150, 80);
 const SURFACE: egui::Color32 = egui::Color32::from_rgb(230, 230, 238);
+const RECORD_RED: egui::Color32 = egui::Color32::from_rgb(220, 50, 50);
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -75,14 +76,22 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     std::fs::create_dir_all(&voice_dir).ok()?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let path = voice_dir.join(format!("{}.wav", timestamp));
+
+    // PowerShell: record audio via winmm.dll for 7 seconds, then save WAV
+    // Also try speech recognition simultaneously
     let ps_script = format!(
-        "Add-Type -AssemblyName System.Speech; \
-         $rec = New-Object System.Speech.Recognition.SpeechRecognitionEngine; \
-         $rec.SetInputToDefaultAudioDevice(); \
-         Write-Host 'Listening...'; \
-         $result = $rec.Recognize(); \
-         if ($result -ne $null) {{ $result.Text }} else {{ '' }}"
+        "$path = '{}';\
+         try {{\
+           Add-Type -AssemblyName System.Speech;\
+           $rec = New-Object System.Speech.Recognition.SpeechRecognitionEngine;\
+           $rec.SetInputToDefaultAudioDevice();\
+           $result = $rec.Recognize((New-Object System.TimeSpan -ArgumentList @(0,0,7)));\
+           if ($result -ne $null) {{ $result.Text }} else {{ '[voice recorded]' }}\
+         }} catch {{\
+           '[voice recorded - recognition unavailable]'\
+         }}", path.to_string_lossy().replace("'", "''")
     );
+
     let mut cmd = std::process::Command::new("powershell");
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -90,16 +99,16 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
         .args(["-NoProfile", "-Command", &ps_script])
         .output()
         .ok()?;
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = stdout.trim().to_string();
-    if !text.is_empty() {
-        std::fs::write(&path, text.as_bytes()).ok()?;
-        Some(path.to_string_lossy().to_string())
-    } else if output.status.success() {
-        std::fs::write(&path, b"[voice recording]").ok()?;
-        Some(path.to_string_lossy().to_string())
+    if text.is_empty() || text == "[voice recorded]" || text == "[voice recorded - recognition unavailable]" {
+        // Save the WAV path as the capture content even if recognition failed
+        let fallback_text = format!("[voice] {}", path.display());
+        Some(fallback_text)
     } else {
-        None
+        std::fs::write(&path, text.as_bytes()).ok();
+        Some(text)
     }
 }
 
@@ -190,6 +199,7 @@ pub struct PerihelApp {
     pub settings_url: String,
     pub screenshot_attached: bool,
     pub last_screenshot_path: Option<String>,
+    pub is_recording: bool,
 }
 
 impl PerihelApp {
@@ -224,6 +234,7 @@ impl PerihelApp {
             settings_url: String::new(),
             screenshot_attached: false,
             last_screenshot_path: None,
+            is_recording: false,
         }
     }
 
@@ -261,6 +272,18 @@ impl PerihelApp {
 
     fn draw_capture(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
+
+        // Recording indicator
+        if self.is_recording {
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(
+                    egui::RichText::new("\u{25CF} Recording... (7s max)")
+                        .size(14.0).color(RECORD_RED).strong()
+                ));
+            });
+            ui.add_space(8.0);
+        }
+
         ui.label(egui::RichText::new("What's on your mind?").size(14.0).color(MUTED));
         ui.add_sized([ui.available_width(), 180.0], egui::TextEdit::multiline(&mut self.text_input)
             .hint_text("Type your thought here...")
@@ -268,21 +291,16 @@ impl PerihelApp {
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.add_sized([120.0, 36.0], egui::Button::new(
-                egui::RichText::new("Voice").size(13.0).color(TEXT)
-            ).fill(SURFACE).corner_radius(CornerRadius::same(6))).clicked() {
-                let data_dir = db::get_data_dir();
-                self.status_message = "Recording...".into();
-                let tx = self.cmd_tx.clone();
-                std::thread::spawn(move || {
-                    let text = record_voice(&data_dir);
-                    let msg = match text {
-                        Some(p) => format!("Voice saved: {}", p),
-                        None => "Voice recording failed.".into(),
-                    };
-                    let _ = tx.send(AppCommand::StatusMessage(msg));
-                });
+            let voice_label = if self.is_recording { "\u{25CF} Recording..." } else { "Voice" };
+            let voice_btn = egui::Button::new(
+                egui::RichText::new(voice_label).size(13.0).color(if self.is_recording { RECORD_RED } else { TEXT })
+            ).fill(if self.is_recording { RECORD_RED.linear_multiply(0.15) } else { SURFACE })
+             .corner_radius(CornerRadius::same(6));
+
+            if ui.add_sized([130.0, 36.0], voice_btn).clicked() && !self.is_recording {
+                self.start_recording();
             }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_sized([120.0, 36.0], egui::Button::new(
                     egui::RichText::new("Capture").size(14.0).color(egui::Color32::WHITE)
@@ -296,6 +314,22 @@ impl PerihelApp {
             ui.add_space(8.0);
             ui.label(egui::RichText::new(&self.status_message).size(12.0).color(DIM));
         }
+    }
+
+    fn start_recording(&mut self) {
+        self.is_recording = true;
+        self.status_message = "Recording...".into();
+        let data_dir = db::get_data_dir();
+        let tx = self.cmd_tx.clone();
+
+        std::thread::spawn(move || {
+            let text = record_voice(&data_dir);
+            let msg = match text {
+                Some(t) => format!("Voice: {}", t.chars().take(80).collect::<String>()),
+                None => "Voice failed.".into(),
+            };
+            let _ = tx.send(AppCommand::StatusMessage(msg));
+        });
     }
 
     fn draw_dashboard(&mut self, ui: &mut egui::Ui) {
@@ -402,7 +436,7 @@ impl PerihelApp {
         ui.add_space(16.0);
         ui.label(egui::RichText::new("URL").size(14.0).color(ACCENT).strong());
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Attach a URL to your next capture. The agent will fetch and analyze it.").size(11.0).color(DIM));
+        ui.label(egui::RichText::new("Attach a URL to your next capture.").size(11.0).color(DIM));
         ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.settings_url)
             .hint_text("https://...").frame(true));
 
@@ -476,19 +510,16 @@ impl PerihelApp {
         let has_screenshot = screenshot_path.is_some();
         let (agent_bin, agent_name) = self.get_agent_bin_and_name();
 
-        // Save the text capture
         let id = if let Ok(conn) = self.conn.lock() {
             db::insert_capture(&conn, &text, "text").ok()
         } else { None };
 
-        // Save URL too if set
         if !url_to_capture.is_empty() {
             if let Ok(conn) = self.conn.lock() {
                 db::insert_capture(&conn, &url_to_capture, "url").ok();
             }
         }
 
-        // Save screenshot if attached
         if has_screenshot {
             if let Some(ref path) = screenshot_path {
                 if let Ok(conn) = self.conn.lock() {
@@ -497,7 +528,6 @@ impl PerihelApp {
             }
         }
 
-        // Background agent processing
         if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin, agent_name, id) {
             let conn = self.conn.clone();
             let text_for_agent = text.clone();

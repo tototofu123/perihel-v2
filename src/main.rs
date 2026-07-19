@@ -86,6 +86,7 @@ impl eframe::App for PerihelRunner {
                 }
                 AppCommand::StatusMessage(msg) => {
                     self.app.status_message = msg;
+                    self.app.is_recording = false;
                 }
             }
         }
