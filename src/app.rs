@@ -20,7 +20,7 @@ const MUTED: egui::Color32 = egui::Color32::from_gray(100);
 const DIM: egui::Color32 = egui::Color32::from_gray(120);
 const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(0, 150, 80);
 const SURFACE: egui::Color32 = egui::Color32::from_rgb(230, 230, 238);
-const RECORD_RED: egui::Color32 = egui::Color32::from_rgb(220, 50, 50);
+const SPEAK_BLUE: egui::Color32 = egui::Color32::from_rgb(0, 120, 200);
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -71,44 +71,21 @@ fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
-fn record_voice(data_dir: &std::path::Path) -> Option<String> {
-    let voice_dir = data_dir.join("voice");
-    std::fs::create_dir_all(&voice_dir).ok()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let path = voice_dir.join(format!("{}.wav", timestamp));
-
-    // PowerShell: record audio via winmm.dll for 7 seconds, then save WAV
-    // Also try speech recognition simultaneously
-    let ps_script = format!(
-        "$path = '{}';\
-         try {{\
-           Add-Type -AssemblyName System.Speech;\
-           $rec = New-Object System.Speech.Recognition.SpeechRecognitionEngine;\
-           $rec.SetInputToDefaultAudioDevice();\
-           $result = $rec.Recognize((New-Object System.TimeSpan -ArgumentList @(0,0,7)));\
-           if ($result -ne $null) {{ $result.Text }} else {{ '[voice recorded]' }}\
-         }} catch {{\
-           '[voice recorded - recognition unavailable]'\
-         }}", path.to_string_lossy().replace("'", "''")
-    );
-
-    let mut cmd = std::process::Command::new("powershell");
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .args(["-NoProfile", "-Command", &ps_script])
-        .output()
-        .ok()?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let text = stdout.trim().to_string();
-    if text.is_empty() || text == "[voice recorded]" || text == "[voice recorded - recognition unavailable]" {
-        // Save the WAV path as the capture content even if recognition failed
-        let fallback_text = format!("[voice] {}", path.display());
-        Some(fallback_text)
-    } else {
-        std::fs::write(&path, text.as_bytes()).ok();
-        Some(text)
+fn speak_text(text: &str) -> bool {
+    // Use vox TTS agent for text-to-speech through speaker
+    let result = std::process::Command::new("vox")
+        .arg(text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok();
+    match result {
+        Some(mut child) => {
+            // Wait for speech to finish (vox plays async, but we wait for process)
+            let _ = child.wait();
+            true
+        }
+        None => false,
     }
 }
 
@@ -199,7 +176,7 @@ pub struct PerihelApp {
     pub settings_url: String,
     pub screenshot_attached: bool,
     pub last_screenshot_path: Option<String>,
-    pub is_recording: bool,
+    pub is_speaking: bool,
 }
 
 impl PerihelApp {
@@ -234,7 +211,7 @@ impl PerihelApp {
             settings_url: String::new(),
             screenshot_attached: false,
             last_screenshot_path: None,
-            is_recording: false,
+            is_speaking: false,
         }
     }
 
@@ -273,12 +250,11 @@ impl PerihelApp {
     fn draw_capture(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
 
-        // Recording indicator
-        if self.is_recording {
+        if self.is_speaking {
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(
-                    egui::RichText::new("\u{25CF} Recording... (7s max)")
-                        .size(14.0).color(RECORD_RED).strong()
+                    egui::RichText::new("Speaking...")
+                        .size(14.0).color(SPEAK_BLUE).strong()
                 ));
             });
             ui.add_space(8.0);
@@ -291,14 +267,15 @@ impl PerihelApp {
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let voice_label = if self.is_recording { "\u{25CF} Recording..." } else { "Voice" };
-            let voice_btn = egui::Button::new(
-                egui::RichText::new(voice_label).size(13.0).color(if self.is_recording { RECORD_RED } else { TEXT })
-            ).fill(if self.is_recording { RECORD_RED.linear_multiply(0.15) } else { SURFACE })
+            let has_text = !self.text_input.trim().is_empty();
+            let speak_label = if self.is_speaking { "Speaking..." } else { "Speak" };
+            let speak_btn = egui::Button::new(
+                egui::RichText::new(speak_label).size(13.0).color(if self.is_speaking { SPEAK_BLUE } else { TEXT })
+            ).fill(if self.is_speaking { SPEAK_BLUE.linear_multiply(0.15) } else { SURFACE })
              .corner_radius(CornerRadius::same(6));
 
-            if ui.add_sized([130.0, 36.0], voice_btn).clicked() && !self.is_recording {
-                self.start_recording();
+            if ui.add_sized([130.0, 36.0], speak_btn).clicked() && has_text && !self.is_speaking {
+                self.start_speaking();
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -316,17 +293,19 @@ impl PerihelApp {
         }
     }
 
-    fn start_recording(&mut self) {
-        self.is_recording = true;
-        self.status_message = "Recording...".into();
-        let data_dir = db::get_data_dir();
+    fn start_speaking(&mut self) {
+        let text = self.text_input.trim().to_string();
+        if text.is_empty() { return; }
+        self.is_speaking = true;
+        self.status_message = "Speaking...".into();
         let tx = self.cmd_tx.clone();
 
         std::thread::spawn(move || {
-            let text = record_voice(&data_dir);
-            let msg = match text {
-                Some(t) => format!("Voice: {}", t.chars().take(80).collect::<String>()),
-                None => "Voice failed.".into(),
+            let ok = speak_text(&text);
+            let msg = if ok {
+                "Done speaking.".into()
+            } else {
+                "Speak failed (vox not found?).".into()
             };
             let _ = tx.send(AppCommand::StatusMessage(msg));
         });
