@@ -6,6 +6,7 @@ mod scheduler;
 use app::PerihelApp;
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, hotkey::{HotKey, Modifiers, Code}};
+use scheduler::Scheduler;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use tray_icon::{TrayIcon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
@@ -13,6 +14,10 @@ use tray_icon::{TrayIcon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
 pub enum AppCommand {
     ShowWindow,
     Quit,
+    ShowCapture,
+    ShowDashboard,
+    ShowSettings,
+    StatusMessage(String),
 }
 
 fn main() -> eframe::Result {
@@ -21,13 +26,19 @@ fn main() -> eframe::Result {
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>();
 
-    let app = PerihelApp::new(conn.clone(), cmd_rx);
+    let app = PerihelApp::new(conn.clone(), cmd_rx, cmd_tx.clone());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 600.0])
             .with_visible(false),
         ..Default::default()
+    };
+
+    let _scheduler = {
+        let s = Scheduler::new(conn.clone(), cmd_tx.clone());
+        s.start();
+        s
     };
 
     eframe::run_native(
@@ -50,11 +61,23 @@ impl eframe::App for PerihelRunner {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(cmd) = self.app.cmd_rx.try_recv() {
             match cmd {
-                AppCommand::ShowWindow => {
+                AppCommand::ShowWindow | AppCommand::ShowCapture => {
+                    self.app.show_capture = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                AppCommand::ShowDashboard => {
+                    self.app.dashboard_open = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                AppCommand::ShowSettings => {
+                    self.app.settings_open = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                AppCommand::StatusMessage(msg) => {
+                    self.app.status_message = msg;
                 }
             }
         }
@@ -93,11 +116,14 @@ fn setup_tray(_cc: &eframe::CreationContext<'_>, cmd_tx: mpsc::Sender<AppCommand
         let menu_receiver = MenuEvent::receiver();
         loop {
             if let Ok(event) = menu_receiver.recv() {
-                if event.id() == "capture" || event.id() == "dashboard" || event.id() == "settings" {
-                    cmd_tx.send(AppCommand::ShowWindow).ok();
-                } else if event.id() == "quit" {
-                    cmd_tx.send(AppCommand::Quit).ok();
-                }
+                let id = event.id().0.clone();
+                match id.as_str() {
+                    "capture" => cmd_tx.send(AppCommand::ShowCapture).ok(),
+                    "dashboard" => cmd_tx.send(AppCommand::ShowDashboard).ok(),
+                    "settings" => cmd_tx.send(AppCommand::ShowSettings).ok(),
+                    "quit" => cmd_tx.send(AppCommand::Quit).ok(),
+                    _ => None,
+                };
             }
         }
     });
