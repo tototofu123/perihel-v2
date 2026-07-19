@@ -20,6 +20,7 @@ pub static KNOWN_AGENTS: &[(&str, &str, &[&str], &[&str])] = &[
     ("copilot", "GitHub Copilot CLI", &["copilot"], &[".config/github-copilot"]),
     ("aider", "Aider", &["aider"], &[".aider"]),
     ("antigravity", "Antigravity", &["antigravity"], &[".antigravity"]),
+    ("vox", "Vox TTS", &["vox"], &[".vox"]),
 ];
 
 pub fn detect_agents() -> Vec<AgentInfo> {

@@ -67,6 +67,14 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     }
 }
 
+fn speak_text(text: &str) {
+    let _ = std::process::Command::new("vox")
+        .arg(text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn apply_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let cr6 = CornerRadius::same(6);
@@ -200,7 +208,7 @@ impl PerihelApp {
     }
 
     pub fn show_capture_popup(&mut self, ctx: &egui::Context) {
-        egui::Window::new("")
+        egui::Window::new("capture_window")
             .id(egui::Id::new("capture_popup"))
             .resizable(false)
             .collapsible(false)
@@ -208,10 +216,10 @@ impl PerihelApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .fixed_size([340.0, 310.0])
             .frame(egui::Frame {
-                fill: ctx.style().visuals.window_fill(),
+                fill: egui::Color32::from_rgb(42, 42, 60),
                 corner_radius: CornerRadius::same(12),
-                shadow: ctx.style().visuals.window_shadow,
-                stroke: ctx.style().visuals.window_stroke,
+                shadow: egui::Shadow { offset: [0, 8].into(), blur: 32, spread: 0, color: egui::Color32::from_black_alpha(160) },
+                stroke: egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 40)),
                 inner_margin: egui::Margin::symmetric(20, 16),
                 ..Default::default()
             })
@@ -234,7 +242,7 @@ impl PerihelApp {
                 ui.add_space(10.0);
 
                 ui.horizontal(|ui| {
-                    let cam = if self.screenshot_attached { "Screenshot \u{2713}" } else { "Screenshot" };
+                    let cam = if self.screenshot_attached { "[CAM]" } else { "Screenshot" };
                     if ui.button(cam).clicked() {
                         let data_dir = db::get_data_dir();
                         if let Some(path) = take_screenshot(&data_dir) {
@@ -243,6 +251,11 @@ impl PerihelApp {
                             self.status_message = "Screenshot attached".into();
                         } else {
                             self.status_message = "Screenshot failed".into();
+                        }
+                    }
+                    if !self.text_input.trim().is_empty() {
+                        if ui.button("Speak").clicked() {
+                            speak_text(self.text_input.trim());
                         }
                     }
                     if ui.button("Voice").clicked() {
@@ -335,16 +348,16 @@ impl PerihelApp {
                     }
 
                     for capture in &filtered {
-                        let (status_color, status_icon) = match capture.status.as_str() {
-                            "done" => (DONE_GREEN, "\u{2713}"),
-                            "dismissed" => (egui::Color32::from_gray(100), "\u{2717}"),
-                            _ => (ACCENT, "\u{25CB}"),
+                        let (_status_color, status_label) = match capture.status.as_str() {
+                            "done" => (DONE_GREEN, "[v]"),
+                            "dismissed" => (egui::Color32::from_gray(100), "[x]"),
+                            _ => (ACCENT, "[o]"),
                         };
-                        let type_icon = match capture.content_type.as_str() {
-                            "url" => "\u{1F517}",
-                            "screenshot" => "\u{1F4F7}",
-                            "voice" => "\u{1F3A4}",
-                            _ => "\u{1F4DD}",
+                        let type_label = match capture.content_type.as_str() {
+                            "url" => "[URL]",
+                            "screenshot" => "[IMG]",
+                            "voice" => "[AUDIO]",
+                            _ => "[TEXT]",
                         };
                         let preview: String = capture.content.chars().take(60).collect();
                         let preview = if capture.content.chars().count() > 60 {
@@ -361,19 +374,24 @@ impl PerihelApp {
                             ..Default::default()
                         }.show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(type_icon);
-                                ui.label(status_icon);
+                                ui.label(type_label);
+                                ui.label(status_label);
                                 ui.add(egui::Label::new(egui::RichText::new(&preview).size(12.0)).sense(egui::Sense::click()));
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("SPK").size(12.0).color(ACCENT)
+                                ).fill(egui::Color32::from_rgb(40, 40, 60)).corner_radius(CornerRadius::same(4))).clicked() {
+                                    speak_text(&capture.content);
+                                }
                                 if capture.status == "pending" {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("\u{2715}").clicked() {
+                                        if ui.button("X").clicked() {
                                             if let Ok(conn) = self.conn.lock() {
                                                 db::update_status(&conn, capture.id, "dismissed").ok();
                                             }
                                             self.refresh_captures();
                                         }
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("\u{2713}").size(12.0).color(DONE_GREEN)
+                                            egui::RichText::new("OK").size(12.0).color(DONE_GREEN)
                                         ).fill(DONE_GREEN.linear_multiply(0.2)).corner_radius(CornerRadius::same(4))).clicked() {
                                             if let Ok(conn) = self.conn.lock() {
                                                 db::update_status(&conn, capture.id, "done").ok();
@@ -407,10 +425,10 @@ impl PerihelApp {
                 ui.add_space(4.0);
                 for agent in &self.agents {
                     if agent.detected {
-                        ui.label(egui::RichText::new(format!("\u{2713} {} {}", agent.name, agent.version.as_deref().unwrap_or("")))
+                        ui.label(egui::RichText::new(format!("[OK] {} {}", agent.name, agent.version.as_deref().unwrap_or("")))
                             .size(12.0).color(egui::Color32::from_gray(190)));
                     } else {
-                        ui.label(egui::RichText::new(format!("\u{2717} {} (not found)", agent.name))
+                        ui.label(egui::RichText::new(format!("[--] {} (not found)", agent.name))
                             .size(12.0).color(egui::Color32::from_gray(110)));
                     }
                 }
