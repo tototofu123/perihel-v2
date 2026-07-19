@@ -22,21 +22,15 @@ fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
 }
 
 fn pipe_through_agent(bin_path: &str, content: &str) -> Option<String> {
-    let mut child = std::process::Command::new(bin_path)
+    let output = std::process::Command::new(bin_path)
         .arg("--prompt")
         .arg(format!("Summarize this thought concisely in 1-2 sentences: {}", content))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .output()
         .ok()?;
-
-    let _ = child.wait().ok()?;
-    let output = child.stdout.take()?;
-    let mut buf = String::new();
-    use std::io::Read;
-    std::io::BufReader::new(output).read_to_string(&mut buf).ok()?;
-    let trimmed = buf.trim().to_string();
+    let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
@@ -107,10 +101,10 @@ impl PerihelApp {
             }).collect::<Vec<_>>()).ok();
         }
 
-        let captures = db::get_all_captures(&conn.lock().unwrap()).unwrap_or_default();
-        let pending_count = db::get_pending_count(&conn.lock().unwrap()).unwrap_or(0);
-        let quiet_start = db::get_setting(&conn.lock().unwrap(), "quiet_start").unwrap_or(Some("23:00".into())).unwrap_or("23:00".into());
-        let quiet_end = db::get_setting(&conn.lock().unwrap(), "quiet_end").unwrap_or(Some("08:00".into())).unwrap_or("08:00".into());
+        let captures = conn.lock().ok().and_then(|c| db::get_all_captures(&c).ok()).unwrap_or_default();
+        let pending_count = conn.lock().ok().and_then(|c| db::get_pending_count(&c).ok()).unwrap_or(0);
+        let quiet_start = conn.lock().ok().and_then(|c| db::get_setting(&c, "quiet_start").ok()).flatten().unwrap_or("23:00".into());
+        let quiet_end = conn.lock().ok().and_then(|c| db::get_setting(&c, "quiet_end").ok()).flatten().unwrap_or("08:00".into());
 
         Self {
             conn,
@@ -260,10 +254,11 @@ impl PerihelApp {
                                     _ => "○",
                                 };
                                 ui.label(status_label);
-                                let preview = if capture.content.len() > 60 {
-                                    format!("{}...", &capture.content[..60])
+                                let preview: String = capture.content.chars().take(60).collect();
+                                let preview = if capture.content.chars().count() > 60 {
+                                    format!("{}...", preview)
                                 } else {
-                                    capture.content.clone()
+                                    preview
                                 };
                                 ui.label(&preview);
                                 if capture.status == "pending" {
@@ -313,18 +308,22 @@ impl PerihelApp {
                 ui.add_space(10.0);
                 ui.heading("Quiet Hours");
                 ui.horizontal(|ui| {
-                    ui.label("Start:");
+                    ui.label("Start (HH:MM):");
                     if ui.text_edit_singleline(&mut self.quiet_start).lost_focus() {
-                        if let Ok(conn) = self.conn.lock() {
-                            db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
+                        if self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':' {
+                            if let Ok(conn) = self.conn.lock() {
+                                db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
+                            }
                         }
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("End:");
+                    ui.label("End (HH:MM):");
                     if ui.text_edit_singleline(&mut self.quiet_end).lost_focus() {
-                        if let Ok(conn) = self.conn.lock() {
-                            db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
+                        if self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':' {
+                            if let Ok(conn) = self.conn.lock() {
+                                db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
+                            }
                         }
                     }
                 });
@@ -347,8 +346,6 @@ impl PerihelApp {
 
     fn do_capture(&mut self) {
         let mut captured = false;
-        let mut last_id = None;
-        let captured_text = self.text_input.clone();
 
         let (agent_bin, agent_name) = {
             let detected: Vec<&agents::AgentInfo> = self.agents.iter().filter(|a| a.detected).collect();
@@ -361,16 +358,42 @@ impl PerihelApp {
         };
 
         if !self.text_input.is_empty() {
-            if let Ok(conn) = self.conn.lock() {
-                last_id = db::insert_capture(&conn, self.text_input.trim(), "text").ok();
+            let content = self.text_input.trim().to_string();
+            let id = if let Ok(conn) = self.conn.lock() {
+                db::insert_capture(&conn, &content, "text").ok()
+            } else {
+                None
+            };
+            if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin.clone(), agent_name.clone(), id) {
+                let conn = self.conn.clone();
+                std::thread::spawn(move || {
+                    if let Some(summary) = pipe_through_agent(&bin, &content) {
+                        if let Ok(db) = conn.lock() {
+                            db::update_ai_summary(&db, cap_id, &summary, &name).ok();
+                        }
+                    }
+                });
             }
             self.text_input.clear();
             captured = true;
         }
 
         if !self.url_input.is_empty() {
-            if let Ok(conn) = self.conn.lock() {
-                last_id = db::insert_capture(&conn, self.url_input.trim(), "url").ok();
+            let content = self.url_input.trim().to_string();
+            let id = if let Ok(conn) = self.conn.lock() {
+                db::insert_capture(&conn, &content, "url").ok()
+            } else {
+                None
+            };
+            if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin.clone(), agent_name.clone(), id) {
+                let conn = self.conn.clone();
+                std::thread::spawn(move || {
+                    if let Some(summary) = pipe_through_agent(&bin, &content) {
+                        if let Ok(db) = conn.lock() {
+                            db::update_ai_summary(&db, cap_id, &summary, &name).ok();
+                        }
+                    }
+                });
             }
             self.url_input.clear();
             captured = true;
@@ -379,7 +402,7 @@ impl PerihelApp {
         if self.screenshot_attached {
             if let Some(ref path) = self.last_screenshot_path {
                 if let Ok(conn) = self.conn.lock() {
-                    last_id = db::insert_capture(&conn, path, "screenshot").ok();
+                    db::insert_capture(&conn, path, "screenshot").ok();
                 }
             }
             self.screenshot_attached = false;
@@ -390,18 +413,6 @@ impl PerihelApp {
         if captured {
             self.status_message = "Captured!".into();
             self.refresh_captures();
-
-            if let (Some(bin), Some(name), Some(id)) = (agent_bin, agent_name, last_id) {
-                let conn = self.conn.clone();
-                std::thread::spawn(move || {
-                    let summary = pipe_through_agent(&bin, &captured_text);
-                    if let Some(summary) = summary {
-                        if let Ok(db) = conn.lock() {
-                            db::update_ai_summary(&db, id, &summary, &name).ok();
-                        }
-                    }
-                });
-            }
         } else {
             self.status_message = "Type something or attach a screenshot.".into();
         }

@@ -21,7 +21,9 @@ impl Scheduler {
         let now = chrono::Local::now();
         let now_min = now.format("%H:%M").to_string();
 
-        if start < end {
+        if start == end {
+            false
+        } else if start < end {
             now_min >= start && now_min < end
         } else {
             now_min >= start || now_min < end
