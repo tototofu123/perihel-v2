@@ -4,6 +4,9 @@ use rusqlite::Connection;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use crate::agents;
 use crate::db::{self, Capture};
 
@@ -18,6 +21,9 @@ const DIM: egui::Color32 = egui::Color32::from_gray(120);
 const DONE_GREEN: egui::Color32 = egui::Color32::from_rgb(0, 150, 80);
 const SURFACE: egui::Color32 = egui::Color32::from_rgb(230, 230, 238);
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
     let screenshots_dir = data_dir.join("screenshots");
     std::fs::create_dir_all(&screenshots_dir).ok()?;
@@ -31,7 +37,10 @@ fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
 }
 
 fn fetch_url_text(url: &str) -> Option<String> {
-    let resp = std::process::Command::new("powershell")
+    let mut cmd = std::process::Command::new("powershell");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let resp = cmd
         .args(["-NoProfile", "-Command", &format!(
             "try {{ (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Substring(0, [Math]::Min(5000, (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Length)) }} catch {{ '' }}", url, url
         )])
@@ -74,7 +83,10 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
          $result = $rec.Recognize(); \
          if ($result -ne $null) {{ $result.Text }} else {{ '' }}"
     );
-    let output = std::process::Command::new("powershell")
+    let mut cmd = std::process::Command::new("powershell");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .args(["-NoProfile", "-Command", &ps_script])
         .output()
         .ok()?;
