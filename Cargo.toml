@@ -1,0 +1,18 @@
+[package]
+name = "perihel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+tray-icon = "0.20"
+global-hotkey = "0.7"
+rusqlite = { version = "0.34", features = ["bundled"] }
+notify-rust = "4"
+which = "7"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+xcap = "0.4"
+rand = "0.8"

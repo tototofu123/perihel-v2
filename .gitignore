@@ -1,0 +1,5 @@
+/target/
+*.swp
+*.lock
+.DS_Store
+Thumbs.db
