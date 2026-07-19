@@ -61,6 +61,7 @@ struct PerihelRunner {
 
 impl eframe::App for PerihelRunner {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        app::apply_style(ctx);
         while let Ok(cmd) = self.app.cmd_rx.try_recv() {
             match cmd {
                 AppCommand::ShowWindow | AppCommand::ShowCapture => {
