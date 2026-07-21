@@ -73,8 +73,6 @@ impl Scheduler {
                                             .ok();
                                         cmd_tx.send(AppCommand::ShowWindow).ok();
 
-                                        // Mark as reminded so it won't re-notify
-                                        crate::db::update_status(&db, cap.id, "pending").ok();
                                         // Clear scheduled_at so it won't trigger again
                                         crate::db::schedule_capture(&db, cap.id, "").ok();
                                     }

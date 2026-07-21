@@ -15,12 +15,10 @@ use tray_icon::{TrayIcon, TrayIconBuilder, menu::{Menu, MenuEvent, MenuItem}};
 
 pub enum AppCommand {
     ShowWindow,
-    HideWindow,
     Quit,
     ShowCapture,
     ShowDashboard,
     ShowSettings,
-    StatusMessage(String),
     RecordingComplete(String),
 }
 
@@ -51,15 +49,15 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             let tray = setup_tray(cc, cmd_tx.clone());
             let hotkey_manager = setup_hotkey(cmd_tx.clone());
-            Ok(Box::new(PerihelRunner { app, tray, hotkey_manager, was_focused: false, blur_timer: 0 }))
+            Ok(Box::new(PerihelRunner { app, _tray: tray, _hotkey_manager: hotkey_manager, was_focused: false, blur_timer: 0 }))
         }),
     )
 }
 
 struct PerihelRunner {
     app: PerihelApp,
-    tray: TrayIcon,
-    hotkey_manager: GlobalHotKeyManager,
+    _tray: TrayIcon,
+    _hotkey_manager: GlobalHotKeyManager,
     was_focused: bool,
     blur_timer: u32,
 }
@@ -74,9 +72,6 @@ impl eframe::App for PerihelRunner {
                     self.blur_timer = 0;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
-                AppCommand::HideWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
                 AppCommand::ShowDashboard => {
                     self.app.view = app::View::Dashboard;
                     self.blur_timer = 0;
@@ -90,15 +85,12 @@ impl eframe::App for PerihelRunner {
                 AppCommand::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                AppCommand::StatusMessage(msg) => {
-                    self.app.status_message = msg;
-                }
                 AppCommand::RecordingComplete(msg) => {
                     self.app.is_recording = false;
                     if msg.starts_with("Transcribed: ") {
                         let text = msg.trim_start_matches("Transcribed: ");
                         if !self.app.text_input.is_empty() {
-                            self.app.text_input.push_str("\n");
+                            self.app.text_input.push('\n');
                         }
                         self.app.text_input.push_str(text);
                         self.app.status_message = "Voice transcribed to text above.".into();

@@ -71,12 +71,7 @@ pub fn insert_capture(conn: &Connection, content: &str, content_type: &str) -> R
     Ok(conn.last_insert_rowid())
 }
 
-pub fn get_pending_captures(conn: &Connection) -> Result<Vec<Capture>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
-         FROM captures WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at != ''
-         ORDER BY created_at DESC"
-    )?;
+fn map_capture_rows(stmt: &mut rusqlite::Statement<'_>) -> Result<Vec<Capture>> {
     let rows = stmt.query_map([], |row| {
         Ok(Capture {
             id: row.get(0)?,
@@ -96,28 +91,21 @@ pub fn get_pending_captures(conn: &Connection) -> Result<Vec<Capture>> {
     Ok(captures)
 }
 
+pub fn get_pending_captures(conn: &Connection) -> Result<Vec<Capture>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
+         FROM captures WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at != ''
+         ORDER BY created_at DESC"
+    )?;
+    map_capture_rows(&mut stmt)
+}
+
 pub fn get_unscheduled_pending(conn: &Connection) -> Result<Vec<Capture>> {
     let mut stmt = conn.prepare(
         "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
          FROM captures WHERE status = 'pending' AND scheduled_at IS NULL"
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Capture {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            content_type: row.get(2)?,
-            status: row.get(3)?,
-            created_at: row.get(4)?,
-            scheduled_at: row.get(5)?,
-            ai_summary: row.get(6)?,
-            agent_used: row.get(7)?,
-        })
-    })?;
-    let mut captures = Vec::new();
-    for row in rows {
-        captures.push(row?);
-    }
-    Ok(captures)
+    map_capture_rows(&mut stmt)
 }
 
 pub fn update_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
@@ -178,23 +166,7 @@ pub fn get_all_captures(conn: &Connection) -> Result<Vec<Capture>> {
         "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
          FROM captures ORDER BY created_at DESC"
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Capture {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            content_type: row.get(2)?,
-            status: row.get(3)?,
-            created_at: row.get(4)?,
-            scheduled_at: row.get(5)?,
-            ai_summary: row.get(6)?,
-            agent_used: row.get(7)?,
-        })
-    })?;
-    let mut captures = Vec::new();
-    for row in rows {
-        captures.push(row?);
-    }
-    Ok(captures)
+    map_capture_rows(&mut stmt)
 }
 
 pub fn get_pending_count(conn: &Connection) -> Result<i64> {

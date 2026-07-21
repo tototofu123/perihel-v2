@@ -62,7 +62,7 @@ fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&
     if let Some(url) = url_text {
         prompt.push_str(&format!("\n\nURL content: {}", url));
     }
-    if let Some(_s) = screenshot_path {
+    if screenshot_path.is_some() {
         prompt.push_str("\n\nA screenshot was also taken.");
     }
     let mut cmd = std::process::Command::new(bin_path);
@@ -537,10 +537,10 @@ impl PerihelApp {
                 && self.quiet_end.as_bytes()[2] == b':'
                 && self.quiet_start.chars().all(|c| c.is_ascii_digit() || c == ':')
                 && self.quiet_end.chars().all(|c| c.is_ascii_digit() || c == ':')
-                && self.quiet_start[..2].parse::<u8>().ok().map_or(false, |h| h < 24)
-                && self.quiet_start[3..].parse::<u8>().ok().map_or(false, |m| m < 60)
-                && self.quiet_end[..2].parse::<u8>().ok().map_or(false, |h| h < 24)
-                && self.quiet_end[3..].parse::<u8>().ok().map_or(false, |m| m < 60);
+                && self.quiet_start[..2].parse::<u8>().ok().is_some_and(|h| h < 24)
+                && self.quiet_start[3..].parse::<u8>().ok().is_some_and(|m| m < 60)
+                && self.quiet_end[..2].parse::<u8>().ok().is_some_and(|h| h < 24)
+                && self.quiet_end[3..].parse::<u8>().ok().is_some_and(|m| m < 60);
             if valid {
                 if let Ok(conn) = self.conn.lock() {
                     db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
