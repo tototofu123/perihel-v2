@@ -89,7 +89,8 @@ pub fn insert_capture(conn: &Connection, content: &str, content_type: &str) -> R
 pub fn get_pending_captures(conn: &Connection) -> Result<Vec<Capture>> {
     let mut stmt = conn.prepare(
         "SELECT id, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used
-         FROM captures ORDER BY created_at DESC"
+         FROM captures WHERE status = 'pending' AND scheduled_at IS NOT NULL AND scheduled_at != ''
+         ORDER BY created_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Capture {

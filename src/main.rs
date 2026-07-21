@@ -49,16 +49,18 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let tray = setup_tray(cc, cmd_tx.clone());
-            let _hotkey = setup_hotkey(cmd_tx.clone());
-            Ok(Box::new(PerihelRunner { app, _tray: tray, was_focused: false }))
+            let hotkey_manager = setup_hotkey(cmd_tx.clone());
+            Ok(Box::new(PerihelRunner { app, tray, hotkey_manager, was_focused: false, blur_timer: 0 }))
         }),
     )
 }
 
 struct PerihelRunner {
     app: PerihelApp,
-    _tray: TrayIcon,
+    tray: TrayIcon,
+    hotkey_manager: GlobalHotKeyManager,
     was_focused: bool,
+    blur_timer: u32,
 }
 
 impl eframe::App for PerihelRunner {
@@ -68,6 +70,7 @@ impl eframe::App for PerihelRunner {
             match cmd {
                 AppCommand::ShowWindow | AppCommand::ShowCapture => {
                     self.app.view = app::View::Capture;
+                    self.blur_timer = 0;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::HideWindow => {
@@ -75,10 +78,12 @@ impl eframe::App for PerihelRunner {
                 }
                 AppCommand::ShowDashboard => {
                     self.app.view = app::View::Dashboard;
+                    self.blur_timer = 0;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::ShowSettings => {
                     self.app.view = app::View::Settings;
+                    self.blur_timer = 0;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 AppCommand::Quit => {
@@ -93,7 +98,13 @@ impl eframe::App for PerihelRunner {
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if !focused && self.was_focused {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.blur_timer += 1;
+            if self.blur_timer > 30 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.blur_timer = 0;
+            }
+        } else {
+            self.blur_timer = 0;
         }
         self.was_focused = focused;
 

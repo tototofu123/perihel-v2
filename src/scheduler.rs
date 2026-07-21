@@ -30,15 +30,6 @@ impl Scheduler {
         }
     }
 
-    fn get_agent_text(cap: &crate::db::Capture) -> Option<String> {
-        if let Some(ref agent) = cap.agent_used {
-            if !agent.is_empty() {
-                return Some(agent.clone());
-            }
-        }
-        None
-    }
-
     pub fn start(&self) {
         let conn = self.conn.clone();
         let cmd_tx = self.cmd_tx.clone();
@@ -66,18 +57,14 @@ impl Scheduler {
                                 if let Ok(scheduled_time) = chrono::DateTime::parse_from_rfc3339(scheduled_at) {
                                     let scheduled_local = scheduled_time.with_timezone(&chrono::Local);
                                     if scheduled_local <= now {
-                                        let preview = if cap.content.len() > 120 {
-                                            format!("{}...", &cap.content[..120])
+                                        let preview = if cap.content.chars().count() > 120 {
+                                            format!("{}...", cap.content.chars().take(120).collect::<String>())
                                         } else {
                                             cap.content.clone()
                                         };
 
-                                        let agent_info = Self::get_agent_text(&cap)
-                                            .map(|a| format!(" (via {})", a))
-                                            .unwrap_or_default();
-
                                         Notification::new()
-                                            .summary(&format!("Perihel{}", agent_info))
+                                            .summary("Perihel")
                                             .body(&preview)
                                             .icon("perihel")
                                             .timeout(0)
@@ -85,10 +72,10 @@ impl Scheduler {
                                             .ok();
                                         cmd_tx.send(AppCommand::ShowWindow).ok();
 
-                                        // Exponential backoff: reschedule further out
-                                        let backoff_hours = (rand::random::<u64>() % 4 + 4) as i64;
-                                        let next = chrono::Local::now() + chrono::Duration::hours(backoff_hours);
-                                        crate::db::schedule_capture(&db, cap.id, &next.to_rfc3339()).ok();
+                                        // Mark as reminded so it won't re-notify
+                                        crate::db::update_status(&db, cap.id, "pending").ok();
+                                        // Clear scheduled_at so it won't trigger again
+                                        crate::db::schedule_capture(&db, cap.id, "").ok();
                                     }
                                 }
                             }

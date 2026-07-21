@@ -56,18 +56,36 @@ fn detect_by_which(bins: &[&str]) -> (Option<String>, Option<String>) {
 }
 
 fn detect_version(bin: &str) -> Option<String> {
-    let output = std::process::Command::new(bin)
+    let mut child = std::process::Command::new(bin)
         .arg("--version")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout.lines().next().unwrap_or("").to_string();
-        if !line.is_empty() {
-            return Some(line);
+    // Wait with 5s timeout to avoid hanging on unresponsive binaries
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            let _ = child.kill();
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    use std::io::Read;
+                    let mut stdout = String::new();
+                    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+                    let line = stdout.lines().next().unwrap_or("").to_string();
+                    if !line.is_empty() {
+                        return Some(line);
+                    }
+                }
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => return None,
         }
     }
-    None
 }
 
 fn detect_config_dir(config_dirs: &[&str]) -> Option<String> {

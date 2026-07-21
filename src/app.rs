@@ -37,18 +37,25 @@ fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
+#[cfg(windows)]
 fn fetch_url_text(url: &str) -> Option<String> {
+    // Escape single quotes to prevent PowerShell injection
+    let safe_url = url.replace('\'', "''");
     let mut cmd = std::process::Command::new("powershell");
-    #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let resp = cmd
         .args(["-NoProfile", "-Command", &format!(
-            "try {{ (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Substring(0, [Math]::Min(5000, (Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10).Content.Length)) }} catch {{ '' }}", url, url
+            "try {{ `$r = Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 10; `$c = `$r.Content; if (`$c.Length -gt 5000) {{ `$c.Substring(0, 5000) }} else {{ `$c }} }} catch {{ '' }}", safe_url
         )])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&resp.stdout).trim().to_string();
     if text.is_empty() { None } else { Some(text) }
+}
+
+#[cfg(not(windows))]
+fn fetch_url_text(_url: &str) -> Option<String> {
+    None
 }
 
 fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&str>, url_text: Option<&str>) -> Option<String> {
@@ -71,13 +78,13 @@ fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
+#[cfg(windows)]
 fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     let voice_dir = data_dir.join("voice");
     std::fs::create_dir_all(&voice_dir).ok()?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let path = voice_dir.join(format!("{}.wav", timestamp));
 
-    // PowerShell: Windows speech recognition with dictation grammar, 15s timeout
     let ps_script = format!(
         "Add-Type -AssemblyName System.Speech;\
          `$rec = New-Object System.Speech.Recognition.SpeechRecognitionEngine;\
@@ -85,11 +92,11 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
          `$grammar = New-Object System.Speech.Recognition.DictationGrammar;\
          `$rec.LoadGrammar(`$grammar);\
          `$result = `$rec.Recognize((New-Object System.TimeSpan -ArgumentList @(0,0,15)));\
-         if (`$result -ne `$null) {{ `$result.Text }} else {{ '' }}"
+         if (`$result -ne `$null) {{ [System.IO.File]::WriteAllText('{}', `$result.Text, [System.Text.Encoding]::UTF8); `$result.Text }} else {{ '' }}",
+        path.to_string_lossy().replace('\'', "''")
     );
 
     let mut cmd = std::process::Command::new("powershell");
-    #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd
         .args(["-NoProfile", "-Command", &ps_script])
@@ -99,13 +106,17 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = stdout.trim().to_string();
     if text.is_empty() {
-        // Save WAV path as fallback
-        Some(format!("[voice] {}", path.display()))
+        let fallback_text = format!("[voice recording] {}", path.display());
+        std::fs::write(&path, b"[audio recording]").ok();
+        Some(fallback_text)
     } else {
-        // Save recognized text as the capture content
-        std::fs::write(&path, text.as_bytes()).ok();
         Some(text)
     }
+}
+
+#[cfg(not(windows))]
+fn record_voice(_data_dir: &std::path::Path) -> Option<String> {
+    None
 }
 
 pub fn apply_style(ctx: &egui::Context) {
@@ -172,6 +183,7 @@ pub fn apply_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+#[derive(Clone, Copy)]
 pub enum View {
     Capture,
     Dashboard,
@@ -196,6 +208,7 @@ pub struct PerihelApp {
     pub screenshot_attached: bool,
     pub last_screenshot_path: Option<String>,
     pub is_recording: bool,
+    quiet_dirty: bool,
 }
 
 impl PerihelApp {
@@ -231,6 +244,7 @@ impl PerihelApp {
             screenshot_attached: false,
             last_screenshot_path: None,
             is_recording: false,
+            quiet_dirty: false,
         }
     }
 
@@ -257,10 +271,7 @@ impl PerihelApp {
                     btn = btn.stroke(egui::Stroke::new(1.0_f32, ACCENT));
                 }
                 if ui.add(btn).clicked() {
-                    self.view = View::Capture;
-                    if let View::Capture = v { self.view = View::Capture; }
-                    if let View::Dashboard = v { self.view = View::Dashboard; }
-                    if let View::Settings = v { self.view = View::Settings; }
+                    self.view = *v;
                 }
             }
         });
@@ -297,9 +308,14 @@ impl PerihelApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_sized([120.0, 36.0], egui::Button::new(
+                let capturing = self.is_recording;
+                let mut btn = egui::Button::new(
                     egui::RichText::new("Capture").size(14.0).color(egui::Color32::WHITE)
-                ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
+                ).fill(if capturing { SURFACE } else { ACCENT }).corner_radius(CornerRadius::same(8));
+                if capturing {
+                    btn = btn.fill(SURFACE);
+                }
+                if ui.add_sized([120.0, 36.0], btn).clicked() && !capturing {
                     self.do_capture();
                 }
             });
@@ -321,13 +337,13 @@ impl PerihelApp {
             let text = record_voice(&data_dir);
             let msg = match text {
                 Some(t) => {
-                    if t.starts_with("[voice]") {
-                        format!("Voice captured (audio saved)")
+                    if t.starts_with("[voice recording]") {
+                        "Voice captured (audio saved)".into()
                     } else {
                         format!("Transcribed: {}", t.chars().take(80).collect::<String>())
                     }
                 }
-                None => "Voice failed.".into(),
+                None => "Voice unavailable on this platform.".into(),
             };
             let _ = tx.send(AppCommand::StatusMessage(msg));
         });
@@ -420,8 +436,13 @@ impl PerihelApp {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Process with:").size(12.0).color(MUTED));
                 let names: Vec<&str> = detected.iter().map(|a| a.name.as_str()).collect();
+                let display_text = if self.selected_agent_idx == 0 {
+                    "None".to_string()
+                } else {
+                    names.get(self.selected_agent_idx - 1).copied().unwrap_or("None").to_string()
+                };
                 egui::ComboBox::from_id_salt("agent_sel")
-                    .selected_text(names.get(self.selected_agent_idx).copied().unwrap_or("None"))
+                    .selected_text(&display_text)
                     .width(180.0)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.selected_agent_idx, 0, "None");
@@ -461,16 +482,27 @@ impl PerihelApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Start:").size(12.0).color(MUTED));
+            let prev_start = self.quiet_start.clone();
             ui.add(egui::TextEdit::singleline(&mut self.quiet_start).desired_width(50.0).frame(true));
+            if self.quiet_start != prev_start { self.quiet_dirty = true; }
+
             ui.label(egui::RichText::new("End:").size(12.0).color(MUTED));
+            let prev_end = self.quiet_end.clone();
             ui.add(egui::TextEdit::singleline(&mut self.quiet_end).desired_width(50.0).frame(true));
+            if self.quiet_end != prev_end { self.quiet_dirty = true; }
         });
-        if self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':'
-            && self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':' {
+
+        if self.quiet_dirty && self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':'
+            && self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':'
+            && self.quiet_start.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit())
+            && self.quiet_start.as_bytes()[3..5].iter().all(|b| b.is_ascii_digit())
+            && self.quiet_end.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit())
+            && self.quiet_end.as_bytes()[3..5].iter().all(|b| b.is_ascii_digit()) {
             if let Ok(conn) = self.conn.lock() {
                 db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
                 db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
             }
+            self.quiet_dirty = false;
         }
 
         ui.add_space(16.0);
@@ -481,9 +513,13 @@ impl PerihelApp {
             let path = data_dir.join("perihel_export.json");
             if let Ok(conn) = self.conn.lock() {
                 if let Ok(captures) = db::get_all_captures(&conn) {
-                    let json = serde_json::to_string_pretty(&captures).unwrap_or_default();
-                    std::fs::write(&path, json).ok();
-                    self.status_message = format!("Exported to {}", path.display());
+                    match serde_json::to_string_pretty(&captures) {
+                        Ok(json) => {
+                            std::fs::write(&path, json).ok();
+                            self.status_message = format!("Exported to {}", path.display());
+                        }
+                        Err(e) => self.status_message = format!("Export failed: {}", e),
+                    }
                 }
             }
         }
@@ -532,13 +568,14 @@ impl PerihelApp {
         if let (Some(bin), Some(name), Some(cap_id)) = (agent_bin, agent_name, id) {
             let conn = self.conn.clone();
             let text_for_agent = text.clone();
-            let url_text = if !url_to_capture.is_empty() {
-                fetch_url_text(&url_to_capture)
-            } else {
-                None
-            };
             let screen = screenshot_path.clone();
+            // URL fetch moved into the background thread to avoid blocking the UI
             std::thread::spawn(move || {
+                let url_text = if !url_to_capture.is_empty() {
+                    fetch_url_text(&url_to_capture)
+                } else {
+                    None
+                };
                 let summary = pipe_through_agent(&bin, &text_for_agent, screen.as_deref(), url_text.as_deref());
                 if let Some(s) = summary {
                     if let Ok(db) = conn.lock() { db::update_ai_summary(&db, cap_id, &s, &name).ok(); }
