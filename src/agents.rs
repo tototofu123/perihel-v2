@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentInfo {
@@ -99,22 +98,4 @@ fn detect_config_dir(config_dirs: &[&str]) -> Option<String> {
     None
 }
 
-pub fn get_env_agent_map() -> HashMap<&'static str, &'static str> {
-    let mut map = HashMap::new();
-    map.insert("CODEX_THREAD_ID", "codex");
-    map.insert("CLAUDECODE", "claude-code");
-    map.insert("OPENCODE", "opencode");
-    map.insert("GEMINI_CLI", "gemini");
-    map.insert("ANTIGRAVITY_AGENT", "antigravity");
-    map
-}
 
-pub fn detect_by_env() -> Option<String> {
-    let map = get_env_agent_map();
-    for (env_var, agent_id) in &map {
-        if std::env::var(env_var).is_ok() {
-            return Some(agent_id.to_string());
-        }
-    }
-    None
-}

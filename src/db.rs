@@ -3,21 +3,6 @@ use serde::{Deserialize, Serialize};
 use chrono::Local;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum CaptureStatus {
-    Pending,
-    Done,
-    Dismissed,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum ContentType {
-    Text,
-    Url,
-    Screenshot,
-    Voice,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Capture {
     pub id: i64,
     pub content: String,
@@ -186,25 +171,6 @@ pub fn save_detected_agents(conn: &Connection, agents: &[DetectedAgent]) -> Resu
         )?;
     }
     Ok(())
-}
-
-pub fn get_detected_agents(conn: &Connection) -> Result<Vec<DetectedAgent>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, version, path, detected_at FROM detected_agents ORDER BY name"
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(DetectedAgent {
-            name: row.get(0)?,
-            version: row.get(1)?,
-            path: row.get(2)?,
-            detected_at: row.get(3)?,
-        })
-    })?;
-    let mut agents = Vec::new();
-    for row in rows {
-        agents.push(row?);
-    }
-    Ok(agents)
 }
 
 pub fn get_all_captures(conn: &Connection) -> Result<Vec<Capture>> {

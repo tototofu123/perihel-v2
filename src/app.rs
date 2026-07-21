@@ -28,7 +28,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
     let screenshots_dir = data_dir.join("screenshots");
     std::fs::create_dir_all(&screenshots_dir).ok()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
     let path = screenshots_dir.join(format!("{}.png", timestamp));
     let monitors = xcap::Monitor::all().ok()?;
     let monitor = monitors.first()?;
@@ -39,7 +39,6 @@ fn take_screenshot(data_dir: &std::path::Path) -> Option<String> {
 
 #[cfg(windows)]
 fn fetch_url_text(url: &str) -> Option<String> {
-    // Escape single quotes to prevent PowerShell injection
     let safe_url = url.replace('\'', "''");
     let mut cmd = std::process::Command::new("powershell");
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -66,14 +65,14 @@ fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&
     if let Some(_s) = screenshot_path {
         prompt.push_str("\n\nA screenshot was also taken.");
     }
-    let output = std::process::Command::new(bin_path)
-        .arg("--prompt")
-        .arg(&prompt)
+    let mut cmd = std::process::Command::new(bin_path);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.arg("--prompt").arg(&prompt)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    let output = cmd.output().ok()?;
     let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
@@ -82,8 +81,8 @@ fn pipe_through_agent(bin_path: &str, text_body: &str, screenshot_path: Option<&
 fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     let voice_dir = data_dir.join("voice");
     std::fs::create_dir_all(&voice_dir).ok()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let path = voice_dir.join(format!("{}.wav", timestamp));
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+    let txt_path = voice_dir.join(format!("{}.txt", timestamp));
 
     let ps_script = format!(
         "Add-Type -AssemblyName System.Speech;\
@@ -93,7 +92,7 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
          `$rec.LoadGrammar(`$grammar);\
          `$result = `$rec.Recognize((New-Object System.TimeSpan -ArgumentList @(0,0,15)));\
          if (`$result -ne `$null) {{ [System.IO.File]::WriteAllText('{}', `$result.Text, [System.Text.Encoding]::UTF8); `$result.Text }} else {{ '' }}",
-        path.to_string_lossy().replace('\'', "''")
+        txt_path.to_string_lossy().replace('\'', "''")
     );
 
     let mut cmd = std::process::Command::new("powershell");
@@ -106,9 +105,7 @@ fn record_voice(data_dir: &std::path::Path) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = stdout.trim().to_string();
     if text.is_empty() {
-        let fallback_text = format!("[voice recording] {}", path.display());
-        std::fs::write(&path, b"[audio recording]").ok();
-        Some(fallback_text)
+        Some(String::new())
     } else {
         Some(text)
     }
@@ -183,7 +180,7 @@ pub fn apply_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum View {
     Capture,
     Dashboard,
@@ -222,10 +219,13 @@ impl PerihelApp {
                 detected_at: chrono::Local::now().to_rfc3339(),
             }).collect::<Vec<_>>()).ok();
         }
-        let captures = conn.lock().ok().and_then(|c| db::get_all_captures(&c).ok()).unwrap_or_default();
-        let pending_count = conn.lock().ok().and_then(|c| db::get_pending_count(&c).ok()).unwrap_or(0);
-        let quiet_start = conn.lock().ok().and_then(|c| db::get_setting(&c, "quiet_start").ok()).flatten().unwrap_or("23:00".into());
-        let quiet_end = conn.lock().ok().and_then(|c| db::get_setting(&c, "quiet_end").ok()).flatten().unwrap_or("08:00".into());
+        let (captures, pending_count, quiet_start, quiet_end) = conn.lock().ok().map(|c| {
+            let caps = db::get_all_captures(&c).unwrap_or_default();
+            let pc = db::get_pending_count(&c).unwrap_or(0);
+            let qs = db::get_setting(&c, "quiet_start").ok().flatten().unwrap_or("23:00".into());
+            let qe = db::get_setting(&c, "quiet_end").ok().flatten().unwrap_or("08:00".into());
+            (caps, pc, qs, qe)
+        }).unwrap_or_default();
         Self {
             conn,
             cmd_rx,
@@ -262,9 +262,8 @@ impl PerihelApp {
 
     fn draw_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let views = [("Capture", View::Capture), ("Dashboard", View::Dashboard), ("Settings", View::Settings)];
-            for (label, v) in &views {
-                let is_active = matches!(&self.view, v if std::mem::discriminant(v) == std::mem::discriminant(&self.view));
+            for (label, v) in &[("Capture", View::Capture), ("Dashboard", View::Dashboard), ("Settings", View::Settings)] {
+                let is_active = self.view == *v;
                 let mut btn = egui::Button::new(egui::RichText::new(*label).size(14.0));
                 if is_active {
                     btn = btn.fill(ACCENT.linear_multiply(0.3));
@@ -291,11 +290,15 @@ impl PerihelApp {
         }
 
         ui.label(egui::RichText::new("What's on your mind?").size(14.0).color(MUTED));
-        ui.add_sized([ui.available_width(), 180.0], egui::TextEdit::multiline(&mut self.text_input)
+        ui.add_sized([ui.available_width(), 140.0], egui::TextEdit::multiline(&mut self.text_input)
             .hint_text("Type your thought here...")
-            .desired_rows(8).frame(true));
+            .desired_rows(6).frame(true));
 
-        ui.add_space(12.0);
+        ui.add_space(8.0);
+        ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.settings_url)
+            .hint_text("https://... (optional URL to attach)").frame(true));
+
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             let voice_label = if self.is_recording { "Recording..." } else { "Voice" };
             let voice_btn = egui::Button::new(
@@ -303,23 +306,33 @@ impl PerihelApp {
             ).fill(if self.is_recording { RECORD_RED.linear_multiply(0.15) } else { SURFACE })
              .corner_radius(CornerRadius::same(6));
 
-            if ui.add_sized([130.0, 36.0], voice_btn).clicked() && !self.is_recording {
-                self.start_recording();
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let capturing = self.is_recording;
-                let mut btn = egui::Button::new(
-                    egui::RichText::new("Capture").size(14.0).color(egui::Color32::WHITE)
-                ).fill(if capturing { SURFACE } else { ACCENT }).corner_radius(CornerRadius::same(8));
-                if capturing {
-                    btn = btn.fill(SURFACE);
-                }
-                if ui.add_sized([120.0, 36.0], btn).clicked() && !capturing {
-                    self.do_capture();
+            ui.add_enabled_ui(!self.is_recording, |ui| {
+                if ui.add_sized([130.0, 36.0], voice_btn).clicked() {
+                    self.start_recording();
                 }
             });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(!self.is_recording, |ui| {
+                    if ui.add_sized([120.0, 36.0], egui::Button::new(
+                        egui::RichText::new("Capture").size(14.0).color(egui::Color32::WHITE)
+                    ).fill(ACCENT).corner_radius(CornerRadius::same(8))).clicked() {
+                        self.do_capture();
+                    }
+                });
+            });
         });
+
+        if self.screenshot_attached {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("[CAM] Screenshot attached").size(11.0).color(DIM));
+                if ui.button("X").clicked() {
+                    self.screenshot_attached = false;
+                    self.last_screenshot_path = None;
+                }
+            });
+        }
 
         if !self.status_message.is_empty() {
             ui.add_space(8.0);
@@ -337,15 +350,15 @@ impl PerihelApp {
             let text = record_voice(&data_dir);
             let msg = match text {
                 Some(t) => {
-                    if t.starts_with("[voice recording]") {
-                        "Voice captured (audio saved)".into()
+                    if t.is_empty() {
+                        "Voice: no speech detected".into()
                     } else {
                         format!("Transcribed: {}", t.chars().take(80).collect::<String>())
                     }
                 }
                 None => "Voice unavailable on this platform.".into(),
             };
-            let _ = tx.send(AppCommand::StatusMessage(msg));
+            let _ = tx.send(AppCommand::RecordingComplete(msg));
         });
     }
 
@@ -456,17 +469,9 @@ impl PerihelApp {
         }
 
         ui.add_space(16.0);
-        ui.label(egui::RichText::new("URL").size(14.0).color(ACCENT).strong());
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Attach a URL to your next capture.").size(11.0).color(DIM));
-        ui.add_sized([ui.available_width(), 28.0], egui::TextEdit::singleline(&mut self.settings_url)
-            .hint_text("https://...").frame(true));
-
-        ui.add_space(16.0);
         ui.label(egui::RichText::new("Screenshot").size(14.0).color(ACCENT).strong());
         ui.add_space(4.0);
-        let cam_label = if self.screenshot_attached { "[CAM]" } else { "Take Screenshot" };
-        if ui.add(egui::Button::new(egui::RichText::new(cam_label).size(12.0)).corner_radius(CornerRadius::same(6))).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new("Take Screenshot").size(12.0)).corner_radius(CornerRadius::same(6))).clicked() {
             let data_dir = db::get_data_dir();
             if let Some(path) = take_screenshot(&data_dir) {
                 self.last_screenshot_path = Some(path);
@@ -475,6 +480,9 @@ impl PerihelApp {
             } else {
                 self.status_message = "Screenshot failed".into();
             }
+        }
+        if self.screenshot_attached {
+            ui.label(egui::RichText::new("Screenshot attached to next capture.").size(11.0).color(DONE_GREEN));
         }
 
         ui.add_space(16.0);
@@ -492,17 +500,23 @@ impl PerihelApp {
             if self.quiet_end != prev_end { self.quiet_dirty = true; }
         });
 
-        if self.quiet_dirty && self.quiet_start.len() == 5 && self.quiet_start.as_bytes()[2] == b':'
-            && self.quiet_end.len() == 5 && self.quiet_end.as_bytes()[2] == b':'
-            && self.quiet_start.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit())
-            && self.quiet_start.as_bytes()[3..5].iter().all(|b| b.is_ascii_digit())
-            && self.quiet_end.as_bytes()[0..2].iter().all(|b| b.is_ascii_digit())
-            && self.quiet_end.as_bytes()[3..5].iter().all(|b| b.is_ascii_digit()) {
-            if let Ok(conn) = self.conn.lock() {
-                db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
-                db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
+        if self.quiet_dirty {
+            let valid = self.quiet_start.len() == 5 && self.quiet_end.len() == 5
+                && self.quiet_start.as_bytes()[2] == b':'
+                && self.quiet_end.as_bytes()[2] == b':'
+                && self.quiet_start.chars().all(|c| c.is_ascii_digit() || c == ':')
+                && self.quiet_end.chars().all(|c| c.is_ascii_digit() || c == ':')
+                && self.quiet_start[..2].parse::<u8>().ok().map_or(false, |h| h < 24)
+                && self.quiet_start[3..].parse::<u8>().ok().map_or(false, |m| m < 60)
+                && self.quiet_end[..2].parse::<u8>().ok().map_or(false, |h| h < 24)
+                && self.quiet_end[3..].parse::<u8>().ok().map_or(false, |m| m < 60);
+            if valid {
+                if let Ok(conn) = self.conn.lock() {
+                    db::set_setting(&conn, "quiet_start", &self.quiet_start).ok();
+                    db::set_setting(&conn, "quiet_end", &self.quiet_end).ok();
+                }
+                self.quiet_dirty = false;
             }
-            self.quiet_dirty = false;
         }
 
         ui.add_space(16.0);
@@ -569,7 +583,6 @@ impl PerihelApp {
             let conn = self.conn.clone();
             let text_for_agent = text.clone();
             let screen = screenshot_path.clone();
-            // URL fetch moved into the background thread to avoid blocking the UI
             std::thread::spawn(move || {
                 let url_text = if !url_to_capture.is_empty() {
                     fetch_url_text(&url_to_capture)

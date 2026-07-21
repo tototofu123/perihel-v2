@@ -16,17 +16,18 @@ impl Scheduler {
     }
 
     fn is_quiet_hours(db: &Connection) -> bool {
-        let start = crate::db::get_setting(db, "quiet_start").ok().flatten().unwrap_or("23:00".into());
-        let end = crate::db::get_setting(db, "quiet_end").ok().flatten().unwrap_or("08:00".into());
-        let now = chrono::Local::now();
-        let now_min = now.format("%H:%M").to_string();
+        let start_str = crate::db::get_setting(db, "quiet_start").ok().flatten().unwrap_or("23:00".into());
+        let end_str = crate::db::get_setting(db, "quiet_end").ok().flatten().unwrap_or("08:00".into());
+        let start = chrono::NaiveTime::parse_from_str(&start_str, "%H:%M").unwrap_or(chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap());
+        let end = chrono::NaiveTime::parse_from_str(&end_str, "%H:%M").unwrap_or(chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        let now = chrono::Local::now().time();
 
         if start == end {
             false
         } else if start < end {
-            now_min >= start && now_min < end
+            now >= start && now < end
         } else {
-            now_min >= start || now_min < end
+            now >= start || now < end
         }
     }
 
@@ -44,7 +45,7 @@ impl Scheduler {
                     if let Ok(captures) = crate::db::get_unscheduled_pending(&db) {
                         for cap in captures {
                             let now = chrono::Local::now();
-                            let offset_hours = (rand::random::<u64>() % 4 + 1) as i64;
+                            let offset_hours = rand::random::<i64>().abs() % 4 + 1;
                             let scheduled = now + chrono::Duration::hours(offset_hours);
                             crate::db::schedule_capture(&db, cap.id, &scheduled.to_rfc3339()).ok();
                         }

@@ -21,6 +21,7 @@ pub enum AppCommand {
     ShowDashboard,
     ShowSettings,
     StatusMessage(String),
+    RecordingComplete(String),
 }
 
 fn main() -> eframe::Result {
@@ -91,12 +92,24 @@ impl eframe::App for PerihelRunner {
                 }
                 AppCommand::StatusMessage(msg) => {
                     self.app.status_message = msg;
+                }
+                AppCommand::RecordingComplete(msg) => {
                     self.app.is_recording = false;
+                    if msg.starts_with("Transcribed: ") {
+                        let text = msg.trim_start_matches("Transcribed: ");
+                        if !self.app.text_input.is_empty() {
+                            self.app.text_input.push_str("\n");
+                        }
+                        self.app.text_input.push_str(text);
+                        self.app.status_message = "Voice transcribed to text above.".into();
+                    } else {
+                        self.app.status_message = msg;
+                    }
                 }
             }
         }
 
-        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
         if !focused && self.was_focused {
             self.blur_timer += 1;
             if self.blur_timer > 30 {
