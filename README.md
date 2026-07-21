@@ -6,58 +6,82 @@ Built for **OpenAI Build Week** (July 2026).
 
 ## Features
 
-- **Quick capture** — Press `Ctrl+Shift+P` anywhere to capture a thought, URL, or screenshot
-- **Voice input** — Dictate thoughts via Windows Speech Recognition
-- **Screenshot capture** — One-click screenshot from the capture popup
-- **Smart resurfacing** — Pending captures are randomly scheduled over the next 1-4 hours and shown as native Windows notifications
-- **AI agent piping** — Route captures through detected AI coding agents (Codex, Claude, OpenCode, Gemini CLI, etc.) for automatic summarization
-- **Dashboard** — Full history with All / Pending / Done / Dismissed filters
-- **System tray** — Lives in the system tray; capture window auto-hides on blur
+- **Quick capture** — Press `Ctrl+Shift+P` anywhere to open the capture window
+- **Voice input** — Dictate thoughts via Windows Speech Recognition (zh-TW/zh-CN/en depending on system)
+- **Screenshot capture** — One-click screenshot attached to any capture
+- **URL attachment** — Paste a URL inline to be fetched and analyzed
+- **Smart resurfacing** — Captures are randomly scheduled 1-4 hours later and shown as native Windows notifications
+- **AI agent piping** — Route captures through detected AI coding agents for automatic summarization
+- **Dashboard** — Full history with All / Pending / Done / Dismissed filters; click any capture to expand full text
+- **System tray** — Lives in the system tray; capture window auto-hides on blur after a short delay
 - **Quiet hours** — Configurable quiet hours suppress notifications
 - **Export** — Export all captures as JSON
 - **100% local-first** — All data stored in SQLite, no cloud dependency
+- **TTS read-aloud** — Uses `vox` CLI for speaking text
 
 ## Installation
 
 ### Prerequisites
 
 - Windows (built and tested on Windows 10/11)
-- Rust toolchain (MSVC or GNU target)
+- Rust toolchain (GNU target recommended for MinGW)
 
 ### Build from source
 
 ```
 git clone https://github.com/tototofu123/perihel.git
 cd perihel
-cargo run --release
+cargo build --release
 ```
 
 The first build will download and compile all dependencies (approx. 2-5 minutes).
+
+To run, double-click `target/release/perihel.exe` directly (no console window).
 
 ### Quick start
 
 1. Launch Perihel — it starts minimized to the system tray
 2. Press `Ctrl+Shift+P` to open the capture window
-3. Type a thought, paste a URL, or click the screenshot/voice buttons
-4. Optionally select an AI agent to auto-summarize your capture
+3. Type a thought, optionally attach a URL or screenshot from Settings
+4. Optionally select an AI agent from Settings to auto-summarize
 5. Click **Capture** — Perihel will randomly schedule resurfacing
-6. When it resurfaces, you'll see a native Windows notification; click **Done** or **Dismiss**
+6. When it resurfaces, you'll see a native Windows notification; click **Done** or **Dismiss** in the Dashboard
 
 ## Usage
 
-### Capture window
+### Capture tab
 
-| Button | Action |
-|--------|--------|
-| 📷 Screenshot | Captures the primary monitor to `perihel/screenshots/` |
-| 🎤 Voice | Records via Windows Speech Recognition |
-| Capture | Saves the thought/URL/screenshot and triggers agent piping |
+| Control | Action |
+|---------|--------|
+| Text field | Type your thought |
+| URL field | Optional URL to attach and analyze |
+| Voice button | Records via Windows Speech Recognition (15s max) |
+| Capture button | Saves and triggers background agent processing |
+| [CAM] indicator | Shows when a screenshot is attached from Settings |
+
+### Dashboard tab
+
+| Control | Action |
+|---------|--------|
+| Filter tabs | All / Pending / Done / Dismissed |
+| Click a capture | Toggle expanded view to see full content |
+| OK button | Mark pending capture as done |
+| X button | Dismiss pending capture |
+
+### Settings tab
+
+| Control | Action |
+|---------|--------|
+| AI Agent selector | Choose which detected agent processes captures |
+| Take Screenshot | Captures the primary monitor to `perihel/screenshots/` |
+| Quiet Hours | Set start/end times to suppress notifications |
+| Export as JSON | Writes all captures to `perihel_export.json` |
 
 ### Tray menu
 
 | Item | Action |
 |------|--------|
-| New Capture | Opens the capture popup |
+| New Capture | Opens the capture window |
 | Dashboard | Opens the full history dashboard |
 | Settings | View detected agents, configure quiet hours, export data |
 | Exit | Quits Perihel entirely |
@@ -80,8 +104,9 @@ Perihel automatically detects installed AI coding agents by scanning PATH and co
 - GitHub Copilot CLI (`copilot`)
 - Aider (`aider`)
 - Antigravity (`antigravity`)
+- Vox TTS (`vox`)
 
-When an agent is selected in the capture popup, the capture content is piped through the agent with a summarization prompt, and the result is saved as an AI summary.
+When an agent is selected in Settings, captures are piped through the agent with a summarization prompt in the background.
 
 ## Tech stack
 
@@ -100,7 +125,7 @@ When an agent is selected in the capture popup, the capture content is piped thr
 ```
 src/
   main.rs      — Entry point, tray setup, hotkey registration
-  app.rs       — GUI views (capture popup, dashboard, settings)
+  app.rs       — GUI views (capture, dashboard, settings)
   db.rs        — SQLite schema and CRUD operations
   agents.rs    — AI coding agent detection
   scheduler.rs — Background scheduling and notifications

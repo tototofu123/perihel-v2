@@ -205,6 +205,7 @@ pub struct PerihelApp {
     pub screenshot_attached: bool,
     pub last_screenshot_path: Option<String>,
     pub is_recording: bool,
+    pub expanded_id: Option<i64>,
     quiet_dirty: bool,
 }
 
@@ -219,12 +220,13 @@ impl PerihelApp {
                 detected_at: chrono::Local::now().to_rfc3339(),
             }).collect::<Vec<_>>()).ok();
         }
-        let (captures, pending_count, quiet_start, quiet_end) = conn.lock().ok().map(|c| {
+        let (captures, pending_count, quiet_start, quiet_end, agent_idx) = conn.lock().ok().map(|c| {
             let caps = db::get_all_captures(&c).unwrap_or_default();
             let pc = db::get_pending_count(&c).unwrap_or(0);
             let qs = db::get_setting(&c, "quiet_start").ok().flatten().unwrap_or("23:00".into());
             let qe = db::get_setting(&c, "quiet_end").ok().flatten().unwrap_or("08:00".into());
-            (caps, pc, qs, qe)
+            let ai = db::get_setting(&c, "selected_agent").ok().flatten().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+            (caps, pc, qs, qe, ai)
         }).unwrap_or_default();
         Self {
             conn,
@@ -238,12 +240,13 @@ impl PerihelApp {
             quiet_start,
             quiet_end,
             pending_count,
-            selected_agent_idx: 0,
+            selected_agent_idx: agent_idx,
             dashboard_filter: "all".into(),
             settings_url: String::new(),
             screenshot_attached: false,
             last_screenshot_path: None,
             is_recording: false,
+            expanded_id: None,
             quiet_dirty: false,
         }
     }
@@ -394,26 +397,48 @@ impl PerihelApp {
             }
 
             for capture in &filtered {
-                let status_label = match capture.status.as_str() {
-                    "done" => "[v]",
-                    "dismissed" => "[x]",
-                    _ => "[o]",
+                let is_expanded = self.expanded_id == Some(capture.id);
+                let status_color = match capture.status.as_str() {
+                    "done" => DONE_GREEN,
+                    "dismissed" => egui::Color32::from_gray(160),
+                    _ => ACCENT,
                 };
-                let type_label = match capture.content_type.as_str() {
-                    "url" => "[URL]",
-                    "screenshot" => "[IMG]",
-                    "voice" => "[AUDIO]",
-                    _ => "[TEXT]",
+                let status_dot = match capture.status.as_str() {
+                    "done" => "\u{25CF}",
+                    "dismissed" => "\u{25CB}",
+                    _ => "\u{25CF}",
                 };
-                let preview: String = capture.content.chars().take(70).collect();
-                let preview = if capture.content.chars().count() > 70 { format!("{}...", preview) } else { preview };
+                let type_color = match capture.content_type.as_str() {
+                    "url" => egui::Color32::from_rgb(100, 140, 200),
+                    "screenshot" => egui::Color32::from_rgb(180, 120, 80),
+                    "voice" => egui::Color32::from_rgb(180, 80, 120),
+                    _ => egui::Color32::from_gray(140),
+                };
+                let type_badge = match capture.content_type.as_str() {
+                    "url" => "URL",
+                    "screenshot" => "IMG",
+                    "voice" => "AUDIO",
+                    _ => "TEXT",
+                };
+                let display_content = if is_expanded {
+                    capture.content.clone()
+                } else {
+                    let preview: String = capture.content.chars().take(70).collect();
+                    if capture.content.chars().count() > 70 { format!("{}...", preview) } else { preview }
+                };
 
-                egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), stroke: egui::Stroke::new(1.0_f32, egui::Color32::from_gray(220)), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
+                egui::Frame { fill: CARD, corner_radius: CornerRadius::same(8), stroke: egui::Stroke::new(1.0_f32, if is_expanded { ACCENT.linear_multiply(0.5) } else { egui::Color32::from_gray(220) }), inner_margin: egui::Margin::symmetric(10, 8), ..Default::default() }
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(type_label).size(11.0).color(DIM));
-                            ui.label(egui::RichText::new(status_label).size(11.0).color(DIM));
-                            ui.add(egui::Label::new(egui::RichText::new(&preview).size(12.0)).sense(egui::Sense::click()));
+                            ui.label(egui::RichText::new(status_dot).size(14.0).color(status_color));
+                            egui::Frame { fill: type_color.linear_multiply(0.2), corner_radius: CornerRadius::same(4), inner_margin: egui::Margin::symmetric(5, 2), ..Default::default() }
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(type_badge).size(10.0).color(type_color).strong());
+                                });
+                            ui.add(egui::Label::new(egui::RichText::new(&display_content).size(12.0)).sense(egui::Sense::click()));
+                            if ui.rect_contains_pointer(ui.min_rect()) && ui.input(|i| i.pointer.any_click()) {
+                                self.expanded_id = if is_expanded { None } else { Some(capture.id) };
+                            }
                             if capture.status == "pending" {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.button("X").clicked() {
@@ -458,9 +483,15 @@ impl PerihelApp {
                     .selected_text(&display_text)
                     .width(180.0)
                     .show_ui(ui, |ui| {
+                        let prev = self.selected_agent_idx;
                         ui.selectable_value(&mut self.selected_agent_idx, 0, "None");
                         for (i, name) in names.iter().enumerate() {
                             ui.selectable_value(&mut self.selected_agent_idx, i + 1, *name);
+                        }
+                        if self.selected_agent_idx != prev {
+                            if let Ok(conn) = self.conn.lock() {
+                                db::set_setting(&conn, "selected_agent", &self.selected_agent_idx.to_string()).ok();
+                            }
                         }
                     });
             });
