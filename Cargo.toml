@@ -1,0 +1,73 @@
+[package]
+name = "perihel-transcribe"
+version = "0.1.0"
+edition = "2021"
+description = "Perihel Transcribe — low-memory on-device Wispr Flow clone, part of Perihel ecosystem. Hold Right Ctrl to dictate, injection anywhere"
+authors = ["perihel"]
+license = "MIT"
+repository = "https://github.com/perihel/perihel-transcribe"
+keywords = ["dictation", "speech-to-text", "parakeet", "sherpa-onnx", "low-memory", "perihel"]
+rust-version = "1.75"
+
+[dependencies]
+# Core async runtime — single consumer ordering (like murmur AsyncStream)
+tokio = { version = "1.38", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+
+# Audio — WASAPI via cpal, ring buffer, resampling
+cpal = "0.15"
+ringbuf = "0.3"
+rubato = "0.14"
+
+# Hotkey — global low-level hook, Right Ctrl default
+global-hotkey = "0.6"
+rdev = "0.5" # fallback for key discrimination if needed
+
+# Transcription — sherpa-onnx Rust bindings (CPU int8, no GPU)
+# sherpa-rs bundles ONNX Runtime; do NOT also depend on ort
+sherpa-rs = { version = "0.6", optional = true }
+hf-hub = { version = "0.3", features = ["tokio"] }
+
+# Text injection — SendInput
+enigo = { version = "0.2" }
+clipboard = "0.5" # fallback Ctrl+V for long text
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
+
+# UI — egui for minimal HUD (no WebView = low RAM)
+eframe = { version = "0.28", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+egui = { version = "0.28", optional = true }
+tray-item = "0.8" # system tray
+
+# Utils
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+regex = "1.10"
+unicode-normalization = "0.1"
+anyhow = "1.0"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+once_cell = "1.19"
+async-trait = "0.1"
+
+[features]
+default = ["sherpa", "hud"]
+sherpa = ["dep:sherpa-rs"]
+hud = ["dep:eframe", "dep:egui"]
+# tiny-whisper fallback (39MB) — enable if you want even lower disk
+whisper-tiny = []
+
+[profile.release]
+opt-level = "z"      # optimize for size (lowest RAM/disk)
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[[bin]]
+name = "perihel-transcribe"
+path = "src/main.rs"
