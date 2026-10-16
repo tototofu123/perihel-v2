@@ -1,10 +1,20 @@
-[package]
-name = "perihel"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "crates/perihel-core",
+    "crates/perihel",
+    "crates/perihel-transcribe",
+]
 
-[dependencies]
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["perihel"]
+
+[workspace.dependencies]
 eframe = "0.31"
+egui = "0.31"
 tray-icon = "0.20"
 global-hotkey = "0.7"
 rusqlite = { version = "0.34", features = ["bundled"] }
@@ -16,8 +26,18 @@ serde_json = "1"
 dirs = "6"
 xcap = "0.4"
 rand = "0.8"
+ureq = { version = "2", features = ["json"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+regex = "1.10"
+unicode-normalization = "0.1"
+cpal = "0.15"
+enigo = "0.2"
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_Memory"] }
 
 [profile.release]
-lto = true
+lto = "thin"
 codegen-units = 1
 strip = "symbols"
+opt-level = "s"

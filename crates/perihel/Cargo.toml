@@ -1,0 +1,36 @@
+[package]
+name = "perihel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Perihel 2.0 — local-first desktop companion: capture, copilot with custom tool calling, dictation, reminders, voice"
+
+[[bin]]
+name = "perihel"
+path = "src/main.rs"
+
+[dependencies]
+perihel-core = { path = "../perihel-core" }
+eframe = { workspace = true }
+egui = { workspace = true }
+tray-icon = { workspace = true }
+global-hotkey = { workspace = true }
+
+notify-rust = { workspace = true }
+which = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+xcap = { workspace = true }
+rand = { workspace = true }
+rusqlite = { workspace = true }
+ureq = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

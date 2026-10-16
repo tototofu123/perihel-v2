@@ -1,5 +1,24 @@
-/target/
+# Perihel 2.0 — workspace
+/target
+.merge-tmp
+
+# Model weights + the sherpa-onnx runtime are fetched by
+# scripts/download-models.ps1, never committed (hundreds of MB).
+/models/bin/
+/models/lib/
+models/**/*.gguf
+models/**/*.onnx
+models/**/*.bin
+models/**/*.ggml
+models/**/*.tar.bz2
+models/**/*.zip
+models/**/*.exe
+models/**/*.dll
+training/.venv
+training/base
+training/out
+training/llama.cpp
+*.log
 *.swp
-*.lock
 .DS_Store
 Thumbs.db

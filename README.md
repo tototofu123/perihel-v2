@@ -1,134 +1,163 @@
 # Perihel
 
-_A local-first desktop companion that captures fleeting intentions and resurfaces them at smart times._
+_A local-first desktop companion that captures fleeting intentions, resurfaces them at smart times, and turns your voice into text in whatever app you're already in._
 
-Built for **OpenAI Build Week** (July 2026).
+Everything runs on-device. No cloud, no account, no telemetry.
+
+## What's in here
+
+Perihel is one Cargo workspace with three crates:
+
+| Crate | What it is |
+|-------|------------|
+| **`perihel`** | The desktop app — quick capture, smart reminders, an on-device LLM copilot, TTS read-aloud |
+| **`perihel-transcribe`** | Hold-to-dictate sidecar — on-device STT injected straight into the focused window |
+| **`perihel-core`** | Shared foundations: SQLite store, dictionary, text formatting, paths, settings, resource guard |
+
+## Design principles
+
+**Nothing heavy stays resident.** Both model paths run as *sidecar processes* that
+load weights, do one job, and exit. `sherpa-onnx-offline.exe` spawns per
+dictation and is gone a second later. `llama-server` spawns on first copilot
+use and is stopped after a configurable idle window. Idle memory is the binary
+itself plus egui — not the model.
+
+**Perihel never competes with your real work.** The process drops to
+`BELOW_NORMAL` priority, and a `ResourceGuard` gates every heavy step behind
+live checks of free RAM and CPU load. On a busy machine the work is skipped or
+deferred, never queued up to thrash the machine.
+
+**Local-first.** Captures live in SQLite under `%LOCALAPPDATA%/perihel`. Config
+is plain JSON under `%APPDATA%/perihel`, editable outside the UI.
 
 ## Features
 
-- **Quick capture** — Press `Ctrl+Shift+P` anywhere to open the capture window
-- **Voice input** — Dictate thoughts via Windows Speech Recognition (zh-TW/zh-CN/en depending on system)
-- **Screenshot capture** — One-click screenshot attached to any capture
-- **URL attachment** — Paste a URL inline to be fetched and analyzed
-- **Smart resurfacing** — Captures are randomly scheduled 1-4 hours later and shown as native Windows notifications
-- **AI agent piping** — Route captures through detected AI coding agents for automatic summarization
-- **Dashboard** — Full history with All / Pending / Done / Dismissed filters; click any capture to expand full text
-- **System tray** — Lives in the system tray; capture window auto-hides on blur after a short delay
-- **Quiet hours** — Configurable quiet hours suppress notifications
-- **Export** — Export all captures as JSON
-- **100% local-first** — All data stored in SQLite, no cloud dependency
-- **TTS read-aloud** — Uses `vox` CLI for speaking text
+### Capture & reminders — `Ctrl+Shift+P`
 
-## Installation
+- Quick capture window anywhere in the OS
+- Attach a URL (fetched and analyzed) or a screenshot
+- Captures are randomly scheduled to resurface 1–4 hours later as native Windows notifications
+- Quiet hours suppress notifications on a schedule you set
+- Dashboard with All / Pending / Done / Dismissed filters; click to expand
+- TTS read-aloud via the `vox` CLI
+- Export everything as JSON
+
+### Dictation — hold `RightCtrl`
+
+Press and hold Right Ctrl, talk, release. The text lands in whatever window had
+focus. No window switch, no upload.
+
+- Three engines, all via the `sherpa-onnx-offline` sidecar:
+
+  | Engine | Size | Notes |
+  |--------|------|-------|
+  | `sensevoice` | ~226 MB | Recommended. zh / en / ja / ko / yue, auto-detects language |
+  | `whisper-tiny` | ~75 MB | Lightest. English only |
+  | `parakeet` | ~600 MB | Highest quality. English only |
+
+- Rule-based formatter plus a user dictionary corrects casing, punctuation and
+  your own jargon before injection
+- Live HUD showing recording state, a tray icon, and a configurable hotkey
+
+### Copilot — `Ctrl+Shift+K`
+
+Local LLM tool calling through a `llama-server` sidecar (llama.cpp), constrained
+by a GBNF grammar in `grammar/perihel-tools.gbnf` so it emits valid tool calls
+rather than prose. Put a `.gguf` in `models/llm/` and set `llm_model` in
+`settings.json`.
+
+### Agent piping
+
+Perihel detects installed AI coding agents on `PATH` and in their config dirs —
+Codex, Claude Code, OpenCode, Gemini CLI, Cursor Agent, Copilot CLI, Aider,
+Antigravity, `vox` — and can pipe captures through one for summarization in the
+background.
+
+## Install
 
 ### Prerequisites
 
-- Windows (built and tested on Windows 10/11)
-- Rust toolchain (GNU target recommended for MinGW)
+- Windows 10/11 (built and tested there; most crates are `cfg(windows)`-aware)
+- Rust toolchain. GNU/MinGW is recommended — some transitive deps need it
+- [`llama.cpp`](https://github.com/ggml-org/llama.cpp) on `PATH` (only for the copilot)
+- [`vox`](https://github.com/…/vox) on `PATH` (only for TTS)
 
-### Build from source
+### Build
+
+```bash
+git clone https://github.com/tototofu123/perihel-v2.git
+cd perihel-v2
+
+# Weights and the sherpa-onnx runtime — gitignored, fetched once.
+./scripts/download-models.ps1                    # sensevoice (recommended)
+./scripts/download-models.ps1 -Engine whisper-tiny
+./scripts/download-models.ps1 -Engine all
+
+cargo build --release -p perihel-transcribe      # dictation
+cargo build --release -p perihel                 # main app
+```
+
+`build.ps1` / `run.bat` wrap `cargo` with MinGW on `PATH`. Because the workspace
+holds several binaries, name the package explicitly:
+
+```powershell
+./build.ps1 test
+./build.ps1 run --release -p perihel-transcribe
+```
+
+Run `run.bat` for the main app, or set `PERIHEL_APP=perihel-transcribe` first
+to run the dictation sidecar instead.
+
+### Where models go
+
+`perihel_core::paths::models_dir()` resolves in this order:
+
+1. `$PERIHEL_MODELS`, if set
+2. the repo's `models/` directory, when running from a source checkout
+3. `%APPDATA%/perihel/models`
+
+`models/stt/<engine>/` holds the weights, `models/bin/` holds the sherpa-onnx
+runtime, `models/llm/` holds your `.gguf`. Only `models/stt/*/tokens.txt` is
+committed — everything else is downloaded.
+
+## Configuration
+
+`%APPDATA%/perihel/settings.json`:
+
+```json
+{
+  "stt_engine": "sensevoice",
+  "dictation_hotkey": "RightCtrl",
+  "llm_model": "perihel-tools-q4_k_m.gguf",
+  "llm_context_window": 4096,
+  "tts_enabled": true,
+  "tts_voice": "",
+  "low_power_mode": true,
+  "pause_below_free_ram_mb": 1500,
+  "quiet_start": "23:00",
+  "quiet_end": "08:00"
+}
+```
+
+Custom corrections live in `%APPDATA%/perihel/dictionary.json`; shared test
+vectors are in `shared/dictionary-test-vectors.json`.
+
+## Layout
 
 ```
-git clone https://github.com/tototofu123/perihel.git
-cd perihel
-cargo build --release
+crates/
+  perihel-core/       db, dictionary, formatting, paths, resource guard, settings
+  perihel/            app: agents, capture UI, copilot, reminders, TTS, vision
+  perihel-transcribe/ dictation: audio, hotkey, injector, STT sidecar, HUD, tray
+grammar/              GBNF grammar constraining copilot tool calls
+scripts/              model download
+shared/               cross-crate test vectors
 ```
 
-The first build will download and compile all dependencies (approx. 2-5 minutes).
+## Testing
 
-To run, double-click `target/release/perihel.exe` directly (no console window).
-
-### Quick start
-
-1. Launch Perihel — it starts minimized to the system tray
-2. Press `Ctrl+Shift+P` to open the capture window
-3. Type a thought, optionally attach a URL or screenshot from Settings
-4. Optionally select an AI agent from Settings to auto-summarize
-5. Click **Capture** — Perihel will randomly schedule resurfacing
-6. When it resurfaces, you'll see a native Windows notification; click **Done** or **Dismiss** in the Dashboard
-
-## Usage
-
-### Capture tab
-
-| Control | Action |
-|---------|--------|
-| Text field | Type your thought |
-| URL field | Optional URL to attach and analyze |
-| Voice button | Records via Windows Speech Recognition (15s max) |
-| Capture button | Saves and triggers background agent processing |
-| [CAM] indicator | Shows when a screenshot is attached from Settings |
-
-### Dashboard tab
-
-| Control | Action |
-|---------|--------|
-| Filter tabs | All / Pending / Done / Dismissed |
-| Click a capture | Toggle expanded view to see full content |
-| OK button | Mark pending capture as done |
-| X button | Dismiss pending capture |
-
-### Settings tab
-
-| Control | Action |
-|---------|--------|
-| AI Agent selector | Choose which detected agent processes captures |
-| Take Screenshot | Captures the primary monitor to `perihel/screenshots/` |
-| Quiet Hours | Set start/end times to suppress notifications |
-| Export as JSON | Writes all captures to `perihel_export.json` |
-
-### Tray menu
-
-| Item | Action |
-|------|--------|
-| New Capture | Opens the capture window |
-| Dashboard | Opens the full history dashboard |
-| Settings | View detected agents, configure quiet hours, export data |
-| Exit | Quits Perihel entirely |
-
-### Hotkeys
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+Shift+P` | Show capture window (global) |
-
-### Agent detection
-
-Perihel automatically detects installed AI coding agents by scanning PATH and config directories:
-
-- OpenAI Codex (`codex`)
-- Claude Code (`claude`)
-- OpenCode (`opencode`)
-- Gemini CLI (`gemini`)
-- Cursor Agent (`cursor-agent`)
-- GitHub Copilot CLI (`copilot`)
-- Aider (`aider`)
-- Antigravity (`antigravity`)
-- Vox TTS (`vox`)
-
-When an agent is selected in Settings, captures are piped through the agent with a summarization prompt in the background.
-
-## Tech stack
-
-- **Rust** — Performance and safety
-- **egui/eframe** — Immediate-mode GUI
-- **tray-icon** — System tray integration
-- **global-hotkey** — Global keyboard shortcuts
-- **rusqlite** — Local SQLite database
-- **notify-rust** — Native Windows notifications
-- **xcap** — Cross-platform screen capture
-- **which** — Agent binary detection
-- **serde** — Serialization for export
-
-## Project structure
-
-```
-src/
-  main.rs      — Entry point, tray setup, hotkey registration
-  app.rs       — GUI views (capture, dashboard, settings)
-  db.rs        — SQLite schema and CRUD operations
-  agents.rs    — AI coding agent detection
-  scheduler.rs — Background scheduling and notifications
+```powershell
+./build.ps1 test
 ```
 
 ## License

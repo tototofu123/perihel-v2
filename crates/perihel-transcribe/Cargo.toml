@@ -1,0 +1,31 @@
+[package]
+name = "perihel-transcribe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Perihel Transcribe — hold Right Ctrl, talk, release; on-device dictation injected into any app"
+
+[[bin]]
+name = "perihel-transcribe"
+path = "src/main.rs"
+
+[dependencies]
+perihel-core = { path = "../perihel-core" }
+cpal = { workspace = true }
+enigo = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+tray-icon = { workspace = true }
+global-hotkey = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[package.metadata.notes]
+engines = "SenseVoice int8 (zh/en default) | whisper-tiny.en (light) | Parakeet int8 (en quality) — all via sherpa-onnx-offline sidecar"

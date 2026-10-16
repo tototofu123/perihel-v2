@@ -1,0 +1,35 @@
+# perihel.tools/v1 — GBNF grammar for Perihel's custom tool calling.
+#
+# Passed to llama.cpp as a grammar sampler constraint: the model physically
+# cannot emit an unknown tool name or a malformed argument. Any small (1B-class)
+# fine-tuned model produces valid, executable calls 100% of the time.
+#
+# Design rule (idea 028): the device/app never invents tools; args are typed
+# and bounded. Unknown requests degrade to reply.text, never to garbage JSON.
+
+root        ::= "{" ws pair "}" eos
+pair        ::= "\"tool\"" ":" ws "\"capture.create\""     "," ws "\"args\"" ":" ws capture-args
+              | "\"tool\"" ":" ws "\"reminder.schedule\""  "," ws "\"args\"" ":" ws reminder-args
+              | "\"tool\"" ":" ws "\"reminder.list\""      "," ws "\"args\"" ":" ws empty-args
+              | "\"tool\"" ":" ws "\"reminder.complete\""  "," ws "\"args\"" ":" ws id-args
+              | "\"tool\"" ":" ws "\"search.captures\""    "," ws "\"args\"" ":" ws query-args
+              | "\"tool\"" ":" ws "\"tts.speak\""          "," ws "\"args\"" ":" ws text-args
+              | "\"tool\"" ":" ws "\"screenshot.take\""    "," ws "\"args\"" ":" ws empty-args
+              | "\"tool\"" ":" ws "\"vision.describe\""    "," ws "\"args\"" ":" ws query-args
+              | "\"tool\"" ":" ws "\"agent.dispatch\""     "," ws "\"args\"" ":" ws prompt-args
+              | "\"tool\"" ":" ws "\"reply.text\""         "," ws "\"args\"" ":" ws text-args
+
+# ---- arg shapes ----
+capture-args    ::= "{" ws "\"text\"" ":" ws string ws "}"
+reminder-args   ::= "{" ws "\"text\"" ":" ws string "," ws "\"at\"" ":" ws time ws "}"
+id-args         ::= "{" ws "\"id\"" ":" ws int ws "}"
+query-args      ::= "{" ws "\"query\"" ":" ws string ws "}"
+text-args       ::= "{" ws "\"text\"" ":" ws string ws "}"
+prompt-args     ::= "{" ws "\"prompt\"" ":" ws string ws "}"
+empty-args      ::= "{" ws "}"
+
+# ---- primitives ----
+time        ::= "\"" [0-2] [0-9] ":" [0-5] [0-9] "\""
+int         ::= "0" | [1-9] [0-9]*
+string      ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) )* "\""
+ws          ::= [ \t\n]*
