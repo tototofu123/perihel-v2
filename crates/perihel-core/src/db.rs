@@ -217,8 +217,11 @@ pub fn insert_reminder(conn: &Connection, text: &str, due_at: &str) -> Result<i6
     Ok(conn.last_insert_rowid())
 }
 
-fn map_reminder_rows(stmt: &mut rusqlite::Statement<'_>) -> Result<Vec<Reminder>> {
-    let rows = stmt.query_map([], |row| {
+fn map_reminder_rows<P: rusqlite::Params>(
+    stmt: &mut rusqlite::Statement<'_>,
+    p: P,
+) -> Result<Vec<Reminder>> {
+    let rows = stmt.query_map(p, |row| {
         Ok(Reminder {
             id: row.get(0)?,
             text: row.get(1)?,
@@ -237,7 +240,7 @@ pub fn due_reminders(conn: &Connection) -> Result<Vec<Reminder>> {
         "SELECT id, text, due_at, status, created_at FROM reminders
          WHERE status = 'pending' AND due_at <= ?1 ORDER BY due_at ASC"
     )?;
-    map_reminder_rows(&mut stmt)
+    map_reminder_rows(&mut stmt, params![now])
 }
 
 /// All reminders still pending, soonest first (for reminder.list).
@@ -246,7 +249,7 @@ pub fn get_pending_reminders(conn: &Connection) -> Result<Vec<Reminder>> {
         "SELECT id, text, due_at, status, created_at FROM reminders
          WHERE status = 'pending' ORDER BY due_at ASC LIMIT 20"
     )?;
-    map_reminder_rows(&mut stmt)
+    map_reminder_rows(&mut stmt, [])
 }
 
 pub fn fire_reminder(conn: &Connection, id: i64) -> Result<()> {

@@ -44,7 +44,7 @@ pub fn execute(ctx: &mut ToolCtx, call: ToolCall) -> Result<String> {
             Ok(format!("Reminder #{id} set for {due}: {text}"))
         }
 
-        ToolCall::ReminderList => {
+        ToolCall::ReminderList {} => {
             let conn = ctx.conn.lock().unwrap();
             let reminders = perihel_core::db::get_pending_reminders(&conn)?;
             if reminders.is_empty() {
@@ -87,7 +87,7 @@ pub fn execute(ctx: &mut ToolCtx, call: ToolCall) -> Result<String> {
             }
         }
 
-        ToolCall::ScreenshotTake => {
+        ToolCall::ScreenshotTake {} => {
             match take_screenshot(&ctx.data_dir) {
                 Some(p) => Ok(format!("Screenshot saved to {p}")),
                 None => Err(anyhow::anyhow!("screenshot capture failed")),
@@ -121,7 +121,8 @@ fn preview(s: &str, n: usize) -> String {
 /// HH:MM local → RFC3339 due time (today if still ahead, else tomorrow).
 fn next_occurrence(hhmm: &str) -> Result<String> {
     let b = hhmm.as_bytes();
-    if hhmm.len() != 4 || b[2] != b':' || !b[..2].iter().all(|c| c.is_ascii_digit()) || !b[3..].iter().all(|c| c.is_ascii_digit()) {
+    // "HH:MM" is 5 bytes; anything shorter isn't zero-padded.
+    if b.len() != 5 || b[2] != b':' || !b[..2].iter().all(|c| c.is_ascii_digit()) || !b[3..].iter().all(|c| c.is_ascii_digit()) {
         anyhow::bail!("invalid time {hhmm:?}");
     }
     let hour: u32 = hhmm[..2].parse()?;
@@ -199,8 +200,17 @@ mod tests {
 
     #[test]
     fn next_occurrence_validates() {
-        assert!(next_occurrence("25:00").is_err());
-        assert!(next_occurrence("9:30").is_err()); // must be HH:MM zero-padded
+        assert!(next_occurrence("25:00").is_err(), "hour > 23");
+        assert!(next_occurrence("15:60").is_err(), "minute > 59");
+        assert!(next_occurrence("9:30").is_err(), "must be zero-padded HH:MM");
+        assert!(next_occurrence("15:0").is_err(), "must be zero-padded HH:MM");
+        assert!(next_occurrence("1a:00").is_err(), "non-digit hour");
+        assert!(next_occurrence("15:0x").is_err(), "non-digit minute");
+        assert!(next_occurrence("1500").is_err(), "missing colon");
+
+        // Boundary values that must be accepted.
+        assert!(next_occurrence("00:00").is_ok());
+        assert!(next_occurrence("23:59").is_ok());
         assert!(next_occurrence("15:00").is_ok());
     }
 }

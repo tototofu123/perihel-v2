@@ -25,7 +25,7 @@ pub enum ToolCall {
 
     /// List pending reminders.
     #[serde(rename = "reminder.list")]
-    ReminderList,
+    ReminderList {},
 
     /// Mark reminder done by id.
     #[serde(rename = "reminder.complete")]
@@ -41,7 +41,7 @@ pub enum ToolCall {
 
     /// Capture the primary monitor to a PNG.
     #[serde(rename = "screenshot.take")]
-    ScreenshotTake,
+    ScreenshotTake {},
 
     /// Describe the most recent screenshot (vision model sidecar).
     #[serde(rename = "vision.describe")]
@@ -75,11 +75,11 @@ impl ToolCall {
         match self {
             Self::Capture { .. } => "capture.create",
             Self::ReminderSchedule { .. } => "reminder.schedule",
-            Self::ReminderList => "reminder.list",
+            Self::ReminderList {} => "reminder.list",
             Self::ReminderComplete { .. } => "reminder.complete",
             Self::SearchCaptures { .. } => "search.captures",
             Self::Speak { .. } => "tts.speak",
-            Self::ScreenshotTake => "screenshot.take",
+            Self::ScreenshotTake {} => "screenshot.take",
             Self::VisionDescribe { .. } => "vision.describe",
             Self::AgentDispatch { .. } => "agent.dispatch",
             Self::Reply { .. } => "reply.text",
@@ -102,16 +102,16 @@ impl ToolCall {
             .trim();
         match serde_json::from_str::<ToolCall>(cleaned) {
             Ok(call) => {
-                // validate reminder time shape even though grammar usually guarantees it
+                // Validate the reminder time shape even though the grammar usually
+                // guarantees it. Must be zero-padded HH:MM with real clock values.
                 if let ToolCall::ReminderSchedule { at, .. } = &call {
                     let b = at.as_bytes();
-                    let ok = at.len() == 4
+                    let ok = b.len() == 5
                         && b[2] == b':'
-                        && b[0].is_ascii_digit()
-                        && b[1].is_ascii_digit()
-                        && b[3].is_ascii_digit()
-                        && b[0] < b'3'
-                        && b[3] < b'6';
+                        && b[..2].iter().all(u8::is_ascii_digit)
+                        && b[3..].iter().all(u8::is_ascii_digit)
+                        && at[..2].parse::<u32>().is_ok_and(|h| h <= 23)
+                        && at[3..].parse::<u32>().is_ok_and(|m| m <= 59);
                     if !ok {
                         return Self::Reply { text: cleaned.to_string() };
                     }
@@ -184,5 +184,54 @@ mod tests {
     fn strips_answer_fences() {
         let c = ToolCall::parse_call("<answer>{\"tool\":\"reminder.list\",\"args\":{}}</answer>");
         assert_eq!(c.name(), "reminder.list");
+    }
+
+    #[test]
+    fn rejects_unpadded_and_out_of_range_times() {
+        for bad in [
+            r#"{"tool":"reminder.schedule","args":{"text":"x","at":"9:30"}}"#,
+            r#"{"tool":"reminder.schedule","args":{"text":"x","at":"25:00"}}"#,
+            r#"{"tool":"reminder.schedule","args":{"text":"x","at":"15:60"}}"#,
+            r#"{"tool":"reminder.schedule","args":{"text":"x","at":"1500"}}"#,
+            r#"{"tool":"reminder.schedule","args":{"text":"x","at":""}}"#,
+        ] {
+            assert_eq!(
+                ToolCall::parse_call(bad).name(),
+                "reply.text",
+                "should have rejected {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_boundary_times() {
+        for good in ["00:00", "09:05", "15:00", "23:59"] {
+            let raw = format!(r#"{{"tool":"reminder.schedule","args":{{"text":"x","at":"{good}"}}}}"#);
+            assert_eq!(ToolCall::parse_call(&raw).name(), "reminder.schedule", "{good}");
+        }
+    }
+
+    /// The GBNF grammar always emits an `"args"` key, even for argument-less
+    /// tools, so every variant must survive parse -> serialize unchanged.
+    #[test]
+    fn round_trips_every_tool_through_the_grammar_shape() {
+        let cases = [
+            ("capture.create", r#"{"tool":"capture.create","args":{"text":"hi"}}"#),
+            ("reminder.schedule", r#"{"tool":"reminder.schedule","args":{"text":"ask Prof. Chan","at":"15:00"}}"#),
+            ("reminder.list", r#"{"tool":"reminder.list","args":{}}"#),
+            ("reminder.complete", r#"{"tool":"reminder.complete","args":{"id":7}}"#),
+            ("search.captures", r#"{"tool":"search.captures","args":{"query":"notes"}}"#),
+            ("tts.speak", r#"{"tool":"tts.speak","args":{"text":"hello"}}"#),
+            ("screenshot.take", r#"{"tool":"screenshot.take","args":{}}"#),
+            ("vision.describe", r#"{"tool":"vision.describe","args":{"query":"what is this"}}"#),
+            ("agent.dispatch", r#"{"tool":"agent.dispatch","args":{"prompt":"fix the build"}}"#),
+            ("reply.text", r#"{"tool":"reply.text","args":{"text":"ok"}}"#),
+        ];
+        assert_eq!(cases.len(), ToolCall::NAMES.len(), "a tool is missing from the round-trip table");
+        for (want, raw) in cases {
+            let call = ToolCall::parse_call(raw);
+            assert_eq!(call.name(), want, "wrong tool for {raw}");
+            assert_eq!(call.to_json(), raw, "round-trip mismatch for {raw}");
+        }
     }
 }
