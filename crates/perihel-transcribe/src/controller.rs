@@ -58,8 +58,7 @@ fn controller_loop(hud: Arc<Mutex<HudState>>, engine: String, hotkey: HotkeyMoni
     let data_dir = perihel_core::app_data_dir().join("voice");
     std::fs::create_dir_all(&data_dir).ok();
 
-    loop {
-        let Some(event) = hotkey.next_event() else { break };
+    while let Some(event) = hotkey.next_event() {
         match event {
             HotkeyEvent::Pressed if recorder.is_none() => {
                 match Recorder::new().and_then(|r| {

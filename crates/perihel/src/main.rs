@@ -45,11 +45,10 @@ fn main() -> eframe::Result {
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>();
 
-    let guard = perihel_core::ResourceGuard::conservative();
     let llm = Arc::new(Mutex::new(LlamaSidecar::new(8642, settings.llm_context_window, settings.llm_model.clone())));
     let vision = Arc::new(Mutex::new(VisionSidecar::new(8643)));
 
-    let app = PerihelApp::new(conn.clone(), cmd_rx, cmd_tx.clone(), llm.clone(), vision.clone(), guard);
+    let app = PerihelApp::new(conn.clone(), cmd_rx, cmd_tx.clone(), llm.clone(), vision.clone());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

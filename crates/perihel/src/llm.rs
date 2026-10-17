@@ -297,11 +297,9 @@ pub fn list_models() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn model_plan_prefers_small() {
-        let mut names = vec!["some-model-q8.gguf", "perihel-tools-q4_k_m.gguf"];
+        let mut names = ["some-model-q8.gguf", "perihel-tools-q4_k_m.gguf"];
         names.sort_by_key(|n| (!n.contains("perihel"), n.len()));
         assert!(names[0].contains("perihel"));
     }

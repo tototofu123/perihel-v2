@@ -12,6 +12,10 @@ pub struct Recorder {
     stream: Option<Stream>,
     samples: Arc<Mutex<Vec<i16>>>,
     rms: Arc<Mutex<f32>>,
+    /// Samples captured so far. Diagnostic only — read by the HUD level meter,
+    /// which is not wired up yet; kept because the counter is already threaded
+    /// through the capture path and is otherwise free.
+    #[allow(dead_code)]
     total: Arc<AtomicU64>,
     source_rate: u32,
 }
@@ -58,6 +62,9 @@ impl Recorder {
         Ok(())
     }
 
+    /// Smoothed input level, 0.0–1.0-ish. Diagnostic for the HUD level meter,
+    /// which is not wired up yet.
+    #[allow(dead_code)]
     pub fn rms(&self) -> f32 {
         self.rms.lock().map(|r| *r).unwrap_or(0.0)
     }

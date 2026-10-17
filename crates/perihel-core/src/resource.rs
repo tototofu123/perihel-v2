@@ -10,8 +10,6 @@
 use std::time::Duration;
 
 #[cfg(windows)]
-use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
-#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
 };
@@ -32,21 +30,6 @@ pub fn set_priority_idle() {
     let _ = std::process::Command::new("renice")
         .args(["10", &std::process::id().to_string()])
         .status();
-}
-
-/// Number of logical processors (for CPU load sampling).
-#[cfg(windows)]
-fn processor_count() -> usize {
-    unsafe {
-        let mut info: SYSTEM_INFO = std::mem::zeroed();
-        GetSystemInfo(&mut info);
-        info.dwNumberOfProcessors as usize
-    }
-}
-
-#[cfg(not(windows))]
-fn processor_count() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
 }
 
 #[cfg(windows)]
@@ -169,7 +152,13 @@ mod tests {
     #[test]
     fn guard_reports_something() {
         let g = ResourceGuard::conservative();
-        let _ = g.check(); // just must not panic
-        assert!(processor_count() >= 1);
+        let _ = g.check(); // must not panic; probes the live machine
+    }
+
+    #[test]
+    fn disabled_guard_never_blocks() {
+        let mut g = ResourceGuard::conservative();
+        g.enabled = false;
+        assert_eq!(g.check(), Pressure::Ok);
     }
 }

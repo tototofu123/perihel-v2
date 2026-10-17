@@ -214,7 +214,6 @@ pub struct PerihelApp {
     // --- 2.0: copilot ---
     pub llm: Arc<Mutex<LlamaSidecar>>,
     pub vision: Arc<Mutex<VisionSidecar>>,
-    pub guard: perihel_core::ResourceGuard,
     pub copilot_input: String,
     pub copilot_log: Vec<(String, String)>,
     pub copilot_busy: bool,
@@ -230,7 +229,6 @@ impl PerihelApp {
         cmd_tx: mpsc::Sender<AppCommand>,
         llm: Arc<Mutex<LlamaSidecar>>,
         vision: Arc<Mutex<VisionSidecar>>,
-        guard: perihel_core::ResourceGuard,
     ) -> Self {
         let agents = agents::detect_agents();
         if let Ok(conn_lock) = conn.lock() {
@@ -275,7 +273,6 @@ impl PerihelApp {
             quiet_dirty: false,
             llm,
             vision,
-            guard,
             copilot_input: String::new(),
             copilot_log: Vec::new(),
             copilot_busy: false,

@@ -15,11 +15,6 @@ pub fn speak(text: &str, voice: &str) -> Result<()> {
     speak_impl(text, voice, false)
 }
 
-/// Speak synchronously (blocks until done) — used where ordering matters.
-pub fn speak_blocking(text: &str, voice: &str) -> Result<()> {
-    speak_impl(text, voice, true)
-}
-
 #[cfg(windows)]
 fn speak_impl(text: &str, voice: &str, wait: bool) -> Result<()> {
     let trimmed: String = text.chars().take(600).collect();
@@ -60,7 +55,9 @@ fn speak_impl(_text: &str, _voice: &str, _wait: bool) -> Result<()> {
     anyhow::bail!("TTS requires Windows (SAPI)")
 }
 
+/// Installed SAPI voices — backs the `tts_voice` setting's picker.
 #[cfg(windows)]
+#[allow(dead_code)] // the picker is not built yet; the setting already accepts a value
 pub fn list_voices() -> Vec<String> {
     let out = Command::new("powershell")
         .creation_flags(CREATE_NO_WINDOW)
@@ -78,6 +75,7 @@ pub fn list_voices() -> Vec<String> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub fn list_voices() -> Vec<String> {
     Vec::new()
 }

@@ -67,7 +67,7 @@ impl Scheduler {
                     }
 
                     // --- capture resurfacing (every 60 s = every 3rd tick) ---
-                    if tick % 3 == 0 {
+                    if tick.is_multiple_of(3) {
                         if let Ok(captures) = perihel_core::db::get_unscheduled_pending(&db) {
                             for cap in captures {
                                 let now = chrono::Local::now();

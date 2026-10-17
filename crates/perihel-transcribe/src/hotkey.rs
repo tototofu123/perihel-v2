@@ -33,19 +33,14 @@ impl HotkeyMonitor {
 
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            loop {
-                match GlobalHotKeyEvent::receiver().recv() {
-                    Ok(evt) => {
-                        let ev = if evt.state == HotKeyState::Pressed {
-                            HotkeyEvent::Pressed
-                        } else {
-                            HotkeyEvent::Released
-                        };
-                        if tx.send(ev).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(evt) = GlobalHotKeyEvent::receiver().recv() {
+                let ev = if evt.state == HotKeyState::Pressed {
+                    HotkeyEvent::Pressed
+                } else {
+                    HotkeyEvent::Released
+                };
+                if tx.send(ev).is_err() {
+                    break;
                 }
             }
         });

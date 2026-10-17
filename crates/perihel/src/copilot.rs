@@ -13,7 +13,6 @@ use perihel_core::{ResourceGuard, ToolCall};
 use rusqlite::Connection;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 /// GBNF grammar shipped with the repo — embedded at build time.
 pub const TOOLS_GRAMMAR: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../grammar/perihel-tools.gbnf"));
@@ -75,7 +74,7 @@ pub fn run_copilot(
                 Err(e) => format!("tool error: {e}"),
             }
         };
-        log::info!("tool {} → {}", call.name(), &result.chars().take(120).collect::<String>());
+        log::info!("tool {} → {}", call.name(), result.chars().take(120).collect::<String>());
         calls.push((call.name().to_string(), result.chars().take(160).collect()));
 
         messages.push(json!({"role": "assistant", "content": raw}));
@@ -110,11 +109,4 @@ fn log_tool_round(conn: &Arc<Mutex<Connection>>, input: &str, calls: &[(String, 
             answer,
         );
     }
-}
-
-/// Wall-clock guard for the UI: how long one copilot run may take before the
-/// UI offers to give up (the thread itself finishes naturally).
-pub fn elapsed_label(since: Instant) -> String {
-    let s = since.elapsed().as_secs();
-    if s < 60 { format!("{s}s") } else { format!("{}m{}s", s / 60, s % 60) }
 }

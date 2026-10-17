@@ -6,7 +6,6 @@ use crate::injector::Phase;
 use anyhow::Result;
 use eframe::egui;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 const W: f32 = 320.0;
 const H: f32 = 64.0;
@@ -14,7 +13,6 @@ const H: f32 = 64.0;
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 140, 200);
 const REC_RED: egui::Color32 = egui::Color32::from_rgb(229, 62, 62);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(235, 238, 245);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(140, 148, 165);
 
 pub fn run(hud: Arc<Mutex<HudState>>) -> Result<()> {
     let viewport = egui::ViewportBuilder::default()
@@ -35,7 +33,7 @@ pub fn run(hud: Arc<Mutex<HudState>>) -> Result<()> {
         options,
         Box::new(move |_cc| {
             position_bottom_center();
-            Ok(Box::new(HudApp { hud, start: Instant::now() }))
+            Ok(Box::new(HudApp { hud }))
         }),
     )
     .map_err(|e| anyhow::anyhow!("HUD exited: {e}"))
@@ -58,7 +56,6 @@ fn position_bottom_center() {}
 
 struct HudApp {
     hud: Arc<Mutex<HudState>>,
-    start: Instant,
 }
 
 impl eframe::App for HudApp {

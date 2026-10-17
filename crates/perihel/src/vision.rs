@@ -33,6 +33,8 @@ impl VisionSidecar {
         self.child.is_some()
     }
 
+    /// Model file currently loaded by the sidecar, for display in Settings.
+    #[allow(dead_code)] // consumed by the Settings model picker, which is not built yet
     pub fn model_label(&self) -> String {
         self.model
             .as_ref()
