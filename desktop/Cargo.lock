@@ -3607,11 +3607,13 @@ dependencies = [
  "chrono",
  "dirs",
  "log",
+ "rand",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "unicode-normalization",
+ "ureq",
  "windows-sys 0.59.0",
 ]
 

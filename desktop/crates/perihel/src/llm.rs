@@ -164,6 +164,74 @@ impl Drop for LlamaSidecar {
     }
 }
 
+/// Remote LLM backend — any OpenAI-compatible API (NVIDIA NIM, Groq, …).
+/// Chosen when `llm_backend == "remote"`; the local .gguf sidecar stays the
+/// offline fallback. No GBNF over the wire — the system prompt carries the
+/// tool-call format, and a malformed reply degrades to plain text upstream.
+pub struct RemoteLlm {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl RemoteLlm {
+    pub fn from_settings(s: &perihel_core::Settings) -> Option<Self> {
+        if s.llm_backend != "remote" {
+            return None;
+        }
+        if s.llm_remote_url.is_empty() {
+            return None;
+        }
+        let api_key = if s.llm_remote_api_key.is_empty() {
+            std::env::var("NVIDIA_NIM_API_KEY").unwrap_or_default()
+        } else {
+            s.llm_remote_api_key.clone()
+        };
+        if api_key.is_empty() {
+            return None;
+        }
+        Some(Self {
+            base_url: s.llm_remote_url.trim_end_matches('/').to_string(),
+            api_key,
+            model: if s.llm_remote_model.is_empty() {
+                "meta/llama-3.2-11b-vision-instruct".into()
+            } else {
+                s.llm_remote_model.clone()
+            },
+        })
+    }
+
+    pub fn label(&self) -> String {
+        format!("remote:{}", self.model)
+    }
+
+    pub fn chat(&self, messages: &[Value], max_tokens: u32) -> Result<String> {
+        let body = json!({
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.4,
+            "stream": false,
+        });
+        let resp = ureq::post(&format!("{}/chat/completions", self.base_url))
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .timeout(Duration::from_secs(120))
+            .send_json(body)
+            .map_err(|e| anyhow!("remote chat failed: {e}"))?;
+        let mut text = String::new();
+        resp.into_reader().take(4_000_000).read_to_string(&mut text)?;
+        let v: Value = serde_json::from_str(&text).context("bad JSON from remote LLM")?;
+        let content = v["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if content.is_empty() {
+            bail!("empty completion");
+        }
+        Ok(content)
+    }
+}
+
 /// GPU plan: try full offload first if a CUDA device exists and free system RAM
 /// is comfortable, else CPU-only. llama-server exits on OOM → caller retries next plan.
 fn gpu_layer_plan(model_size_gb: &f64) -> Vec<u32> {

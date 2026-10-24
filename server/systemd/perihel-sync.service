@@ -1,0 +1,16 @@
+[Unit]
+Description=Perihel capture sync server
+After=network.target
+
+[Service]
+Environment=PERIHEL_SYNC_NO_TLS=1
+ExecStart=/usr/bin/python3 /opt/perihel-sync/server.py
+Restart=always
+RestartSec=5
+MemoryMax=200M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/perihel-sync
+
+[Install]
+WantedBy=multi-user.target

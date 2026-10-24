@@ -1,23 +1,41 @@
-# Perihel 2.0 — workspace
-/target
-.merge-tmp
+# Perihel monorepo — gitignore
+
+# --- desktop (Rust workspace) ---
+/desktop/target
+/desktop/.merge-tmp
 
 # Model weights + the sherpa-onnx runtime are fetched by
-# scripts/download-models.ps1, never committed (hundreds of MB).
-/models/bin/
-/models/lib/
-models/**/*.gguf
-models/**/*.onnx
-models/**/*.bin
-models/**/*.ggml
-models/**/*.tar.bz2
-models/**/*.zip
-models/**/*.exe
-models/**/*.dll
-training/.venv
-training/base
-training/out
-training/llama.cpp
+# desktop/scripts/download-models.ps1, never committed (hundreds of MB).
+/desktop/models/bin/
+/desktop/models/lib/
+desktop/models/**/*.gguf
+desktop/models/**/*.onnx
+desktop/models/**/*.bin
+desktop/models/**/*.ggml
+desktop/models/**/*.tar.bz2
+desktop/models/**/*.zip
+desktop/models/**/*.exe
+desktop/models/**/*.dll
+desktop/training/.venv
+desktop/training/base
+desktop/training/out
+desktop/training/llama.cpp
+
+# --- server (VM) ---
+# Your real VM address/token/topic live here — never committed.
+# Copy server/local.env.example to server/local.env and fill it in.
+server/local.env
+
+# --- mobile (Android) ---
+mobile/.gradle/
+mobile/build/
+mobile/app/build/
+mobile/local.properties
+mobile/.idea/
+*.jks
+*.keystore
+
+# --- misc ---
 *.log
 *.swp
 .DS_Store

@@ -6,7 +6,7 @@
 //! Any parse failure degrades to `reply.text` carrying the raw output — a bad
 //! model day costs one weird answer, never a crash or a lost capture.
 
-use crate::llm::LlamaSidecar;
+use crate::llm::{LlamaSidecar, RemoteLlm};
 use crate::tools::{self, ToolCtx};
 use crate::vision::VisionSidecar;
 use perihel_core::{ResourceGuard, ToolCall};
@@ -25,6 +25,7 @@ pub struct CopilotOutcome {
 #[allow(clippy::too_many_arguments)]
 pub fn run_copilot(
     llm: &Arc<Mutex<LlamaSidecar>>,
+    remote: Option<&RemoteLlm>,
     vision: &Arc<Mutex<VisionSidecar>>,
     conn: &Arc<Mutex<Connection>>,
     data_dir: std::path::PathBuf,
@@ -41,7 +42,17 @@ pub fn run_copilot(
     let mut final_answer: Option<String> = None;
 
     for _round in 0..3 {
-        let raw = {
+        let raw = if let Some(r) = remote {
+            match r.chat(&messages, 350) {
+                Ok(r) => r,
+                Err(e) => {
+                    return CopilotOutcome {
+                        answer: format!("Copilot unavailable: {e}"),
+                        calls,
+                    }
+                }
+            }
+        } else {
             let mut sidecar = llm.lock().unwrap();
             match sidecar.ensure_running(guard).and_then(|_| sidecar.chat(&messages, Some(TOOLS_GRAMMAR), 350)) {
                 Ok(r) => r,
@@ -83,17 +94,17 @@ pub fn run_copilot(
 
     let answer = final_answer.unwrap_or_else(|| {
         // loop exhausted without a reply — try one unconstrained summary
-        let mut sidecar = llm.lock().unwrap();
-        sidecar
-            .chat(
-                &[
-                    json!({"role": "system", "content": "Summarize the tool results for the user in one short paragraph."}),
-                    json!({"role": "user", "content": format!("{:?}", calls)}),
-                ],
-                None,
-                200,
-            )
-            .unwrap_or_else(|e| format!("Tools ran ({}) but the summary failed: {e}", calls.len()))
+        let summary_messages = &[
+            json!({"role": "system", "content": "Summarize the tool results for the user in one short paragraph."}),
+            json!({"role": "user", "content": format!("{:?}", calls)}),
+        ];
+        if let Some(r) = remote {
+            r.chat(summary_messages, 200)
+        } else {
+            let mut sidecar = llm.lock().unwrap();
+            sidecar.chat(summary_messages, None, 200)
+        }
+        .unwrap_or_else(|e| format!("Tools ran ({}) but the summary failed: {e}", calls.len()))
     });
 
     log_tool_round(conn, user_input, &calls, &answer);

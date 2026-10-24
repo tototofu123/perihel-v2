@@ -74,7 +74,25 @@ pub fn init_schema(conn: &mut Connection) -> Result<()> {
         INSERT OR IGNORE INTO settings (key, value) VALUES ('hotkey', 'Ctrl+Shift+P');
     ")?;
 
+    // sync columns (added after 2.0): stable cross-device identity + change clock
+    ensure_column(conn, "captures", "uuid", "TEXT")?;
+    ensure_column(conn, "captures", "updated_at", "TEXT")?;
     Ok(())
+}
+
+/// SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — check first.
+pub fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt.query_map([], |row| row.get::<_, String>(1))?
+        .any(|c| c.map(|c| c == column).unwrap_or(false));
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
+}
+
+fn now_rfc3339() -> String {
+    Local::now().to_rfc3339()
 }
 
 pub fn get_data_dir() -> std::path::PathBuf {
@@ -85,7 +103,7 @@ pub fn get_data_dir() -> std::path::PathBuf {
 pub fn insert_capture(conn: &Connection, content: &str, content_type: &str) -> Result<i64> {
     let now = Local::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO captures (content, content_type, status, created_at) VALUES (?1, ?2, 'pending', ?3)",
+        "INSERT INTO captures (content, content_type, status, created_at, updated_at) VALUES (?1, ?2, 'pending', ?3, ?3)",
         params![content, content_type, now],
     )?;
     Ok(conn.last_insert_rowid())
@@ -130,24 +148,24 @@ pub fn get_unscheduled_pending(conn: &Connection) -> Result<Vec<Capture>> {
 
 pub fn update_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     conn.execute(
-        "UPDATE captures SET status = ?1 WHERE id = ?2",
-        params![status, id],
+        "UPDATE captures SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, now_rfc3339(), id],
     )?;
     Ok(())
 }
 
 pub fn schedule_capture(conn: &Connection, id: i64, scheduled_at: &str) -> Result<()> {
     conn.execute(
-        "UPDATE captures SET scheduled_at = ?1 WHERE id = ?2",
-        params![scheduled_at, id],
+        "UPDATE captures SET scheduled_at = ?1, updated_at = ?2 WHERE id = ?3",
+        params![scheduled_at, now_rfc3339(), id],
     )?;
     Ok(())
 }
 
 pub fn update_ai_summary(conn: &Connection, id: i64, summary: &str, agent: &str) -> Result<()> {
     conn.execute(
-        "UPDATE captures SET ai_summary = ?1, agent_used = ?2 WHERE id = ?3",
-        params![summary, agent, id],
+        "UPDATE captures SET ai_summary = ?1, agent_used = ?2, updated_at = ?3 WHERE id = ?4",
+        params![summary, agent, now_rfc3339(), id],
     )?;
     Ok(())
 }
@@ -311,4 +329,98 @@ pub fn get_recent_tool_log(conn: &Connection, limit: i64) -> Result<Vec<(i64, St
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })?;
     rows.collect()
+}
+
+// ---------- sync (2.1) ----------
+
+/// One capture as it travels over the wire — uuid is the cross-device identity,
+/// updated_at is the last-write-wins clock.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SyncCapture {
+    pub uuid: String,
+    pub content: String,
+    pub content_type: String,
+    pub status: String,
+    pub created_at: String,
+    pub scheduled_at: Option<String>,
+    pub ai_summary: Option<String>,
+    pub agent_used: Option<String>,
+    pub updated_at: String,
+}
+
+/// Give every capture a stable identity on first sync.
+pub fn stamp_missing_uuids(conn: &Connection, uuid_for: impl Fn(i64) -> String) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT id FROM captures WHERE uuid IS NULL")?;
+    let ids: Vec<i64> = stmt.query_map([], |row| row.get(0))?.flatten().collect();
+    for id in ids {
+        conn.execute(
+            "UPDATE captures SET uuid = ?1, updated_at = COALESCE(updated_at, ?2) WHERE id = ?3",
+            params![uuid_for(id), now_rfc3339(), id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Every local capture, for the push phase (full-state reconciliation is fine
+/// at personal scale; the server keeps whichever copy is newer).
+pub fn get_sync_captures(conn: &Connection) -> Result<Vec<SyncCapture>> {
+    let mut stmt = conn.prepare(
+        "SELECT uuid, content, content_type, status, created_at, scheduled_at, ai_summary, agent_used, updated_at
+         FROM captures WHERE uuid IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SyncCapture {
+            uuid: row.get(0)?,
+            content: row.get(1)?,
+            content_type: row.get(2)?,
+            status: row.get(3)?,
+            created_at: row.get(4)?,
+            scheduled_at: row.get(5)?,
+            ai_summary: row.get(6)?,
+            agent_used: row.get(7)?,
+            updated_at: row.get::<_, Option<String>>(8)?.unwrap_or_else(now_rfc3339),
+        })
+    })?;
+    rows.collect()
+}
+
+/// Merge one remote capture into the local DB — last write wins on updated_at.
+/// Returns true if the local row was changed.
+pub fn apply_remote_capture(conn: &Connection, cap: &SyncCapture) -> Result<bool> {
+    let existing: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id, updated_at FROM captures WHERE uuid = ?1",
+            params![cap.uuid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+
+    match existing {
+        Some((id, local_updated)) => {
+            if local_updated.as_deref().unwrap_or("") >= cap.updated_at.as_str() {
+                return Ok(false);
+            }
+            conn.execute(
+                "UPDATE captures SET content = ?1, content_type = ?2, status = ?3,
+                 scheduled_at = ?4, ai_summary = ?5, agent_used = ?6, updated_at = ?7
+                 WHERE id = ?8",
+                params![cap.content, cap.content_type, cap.status, cap.scheduled_at,
+                        cap.ai_summary, cap.agent_used, cap.updated_at, id],
+            )?;
+            Ok(true)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO captures (uuid, content, content_type, status, created_at,
+                 scheduled_at, ai_summary, agent_used, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![cap.uuid, cap.content, cap.content_type, cap.status, cap.created_at,
+                        cap.scheduled_at, cap.ai_summary, cap.agent_used, cap.updated_at],
+            )?;
+            Ok(true)
+        }
+    }
 }

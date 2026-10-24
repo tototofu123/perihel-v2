@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Perihel</string>
+    <style name="Theme.Perihel" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#141419</item>
+        <item name="android:windowBackground">#141419</item>
+    </style>
+</resources>

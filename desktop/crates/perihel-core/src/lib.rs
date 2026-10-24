@@ -10,6 +10,7 @@ pub mod formatting;
 pub mod paths;
 pub mod resource;
 pub mod settings;
+pub mod sync;
 pub mod tools;
 
 pub use db::{Capture, DetectedAgent, Reminder};

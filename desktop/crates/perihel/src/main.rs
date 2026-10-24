@@ -43,6 +43,11 @@ fn main() -> eframe::Result {
 
     let settings = perihel_core::Settings::load_or_default();
 
+    // cloud sync — no-op unless sync_enabled in settings.json
+    if let Some(cfg) = perihel_core::sync::SyncConfig::from_settings(&settings) {
+        perihel_core::sync::spawn_sync_loop(conn.clone(), cfg);
+    }
+
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>();
 
     let llm = Arc::new(Mutex::new(LlamaSidecar::new(8642, settings.llm_context_window, settings.llm_model.clone())));

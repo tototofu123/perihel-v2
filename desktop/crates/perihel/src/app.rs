@@ -317,7 +317,9 @@ impl PerihelApp {
 
         // status line: model + engine state
         ui.horizontal(|ui| {
-            let (label, color) = {
+            let (label, color) = if let Some(remote) = crate::llm::RemoteLlm::from_settings(&self.settings) {
+                (format!("● {}", remote.label()), DONE_GREEN)
+            } else {
                 let llm = self.llm.lock().unwrap();
                 if llm.is_running() {
                     (format!("● {}", llm.model_label()), DONE_GREEN)
@@ -401,6 +403,7 @@ impl PerihelApp {
         let conn = self.conn.clone();
         let llm = self.llm.clone();
         let vision = self.vision.clone();
+        let remote = crate::llm::RemoteLlm::from_settings(&self.settings);
         let data_dir = db::get_data_dir();
         let guard = perihel_core::ResourceGuard::conservative();
         let tts_enabled = self.settings.tts_enabled;
@@ -408,7 +411,7 @@ impl PerihelApp {
         let tx = self.cmd_tx.clone();
 
         std::thread::spawn(move || {
-            let outcome = copilot::run_copilot(&llm, &vision, &conn, data_dir, &guard, &input, tts_enabled, tts_voice);
+            let outcome = copilot::run_copilot(&llm, remote.as_ref(), &vision, &conn, data_dir, &guard, &input, tts_enabled, tts_voice);
             tx.send(AppCommand::CopilotDone { input, answer: outcome.answer, calls: outcome.calls }).ok();
         });
     }
