@@ -135,6 +135,15 @@ def send_nudges(conn):
 
 def purge_deleted(conn):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=PURGE_DAYS)).isoformat()
+    doomed = conn.execute(
+        "SELECT uuid, media_id FROM captures WHERE deleted = 1 AND deleted_at < ?",
+        (cutoff,)).fetchall()
+    for row in doomed:
+        if row["media_id"]:
+            path = os.path.join(DATA_DIR, "media", row["media_id"])
+            if os.path.isfile(path):
+                os.remove(path)
+                print(f"purged media {row['media_id']}", flush=True)
     cur = conn.execute("DELETE FROM captures WHERE deleted = 1 AND deleted_at < ?", (cutoff,))
     if cur.rowcount:
         print(f"purged {cur.rowcount} soft-deleted captures older than {PURGE_DAYS}d", flush=True)

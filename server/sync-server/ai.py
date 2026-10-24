@@ -63,7 +63,7 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _nim_call(messages, tools=None):
+def _nim_call(messages, tools=None, timeout=90):
     """Single NIM request honoring the rate limit. Returns the response JSON."""
     global _last_call
     wait = MIN_CALL_GAP_S - (time.time() - _last_call)
@@ -78,10 +78,59 @@ def _nim_call(messages, tools=None):
         NIM_URL, data=json.dumps(body).encode(), method="POST",
         headers={"Authorization": f"Bearer {NIM_KEY}",
                  "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=90) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read().decode())
     _last_call = time.time()
     return out
+
+
+JSON_INSTRUCTION = ("Reply with ONLY minified JSON, no prose: "
+                    f'{{"summary": str, "category": one of {CATEGORIES}, '
+                    '"reminders": [{"text": str, "due_at": iso}] or [], '
+                    '"memories": [{"key": str, "value": str}] or []}}')
+
+
+def _json_turn(raw_content: str, system_msg: dict):
+    """Strict-JSON completion (no tools). Returns (summary, category,
+    reminders, memories) or (None,...) on failure."""
+    try:
+        fb = _nim_call([
+            {"role": "system", "content": JSON_INSTRUCTION},
+            {"role": "user", "content": raw_content},
+        ])
+        text = fb["choices"][0]["message"]["content"].strip()
+        start, end = text.find("{"), text.rfind("}")
+        parsed = json.loads(text[start:end + 1])
+        return (parsed.get("summary"),
+                parsed.get("category"),
+                [(r["text"], _fix_due_at(r["due_at"])) for r in parsed.get("reminders", [])],
+                [(m["key"], m["value"]) for m in parsed.get("memories", [])])
+    except Exception:
+        return None, None, [], []
+
+
+def _process_json(messages, raw_content: str, user_content) -> tuple | None:
+    """Vision path. NIM vision endpoints hang on system+image turns, so the
+    JSON instruction rides in the text part of the single user message."""
+    try:
+        text_part = user_content[0]["text"] if isinstance(user_content, list) else raw_content
+        image_part = user_content[1] if isinstance(user_content, list) else None
+        message = [{"role": "user", "content": [
+            {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
+            image_part,
+        ]}]
+        fb = _nim_call(message, timeout=240)  # vision turns queue long on the free tier
+        text = fb["choices"][0]["message"]["content"].strip()
+        start, end = text.find("{"), text.rfind("}")
+        parsed = json.loads(text[start:end + 1])
+        return (parsed.get("summary"),
+                parsed.get("category"),
+                [(r["text"], _fix_due_at(r["due_at"])) for r in parsed.get("reminders", [])],
+                [(m["key"], m["value"]) for m in parsed.get("memories", [])])
+    except Exception as e:
+        import traceback
+        print(f"vision turn failed: {e}\n{traceback.format_exc()[-400:]}", flush=True)
+        return None
 
 
 def _fix_due_at(due: str) -> str:
@@ -129,55 +178,60 @@ Current time: {now}
 Call your tools now (all applicable ones, in parallel). Do not reply with prose."""
 
 
-def process_capture(uuid: str) -> dict:
-    """Run AI over one capture. Writes results, returns {ai_state, reply}."""
+def process_capture(uuid: str, thumb_data_uri: str | None = None) -> dict:
+    """Run AI over one capture. Writes results, returns {ai_state, reply}.
+    thumb_data_uri: optional base64 JPEG the vision model can look at."""
     conn = _db()
     row = conn.execute("SELECT content, content_type, ai_attempts FROM captures WHERE uuid = ?", (uuid,)).fetchone()
     if row is None:
         conn.close()
         return {"ai_state": "error", "reply": "capture vanished"}
 
+    user_content = row["content"]
+    if thumb_data_uri and row["content_type"] in ("image", "video"):
+        # vision turn: describe what is attached alongside the user's words
+        user_content = [
+            {"type": "text", "text": f"{user_content}\n(An image is attached — "
+             "factor what you see into the summary and category.)"},
+            {"type": "image_url", "image_url": {"url": thumb_data_uri}},
+        ]
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT.format(memory=_memory_block(conn), now=now_utc())},
-        {"role": "user", "content": row["content"]},
+        {"role": "user", "content": user_content},
     ]
     conn.close()
 
-    try:
-        resp = _nim_call(messages, tools=TOOLS)
-        msg = resp["choices"][0]["message"]
-    except Exception as e:  # network / 5xx / rate-limit — retry-once later
-        return {"ai_state": "queued-retry", "reply": f"saved (AI hiccup: {str(e)[:80]} — will retry)"}
-
-    summary = category = None
-    reminders, memories = [], []
-
-    for call in msg.get("tool_calls") or []:
-        fn, args = call["function"]["name"], json.loads(call["function"]["arguments"] or "{}")
-        if fn == "capture.update":
-            summary, category = args.get("summary"), args.get("category")
-        elif fn == "reminder.create":
-            reminders.append((args.get("text", ""), _fix_due_at(args.get("due_at", ""))))
-        elif fn == "memory.write":
-            memories.append((args.get("key", ""), args.get("value", "")))
-
-    if not summary:  # model ignored tools — strict JSON fallback
+    # Vision turns: the vision endpoints reject the `tools` parameter, so
+    # images take the strict-JSON path directly instead of tool calling.
+    vision = thumb_data_uri and isinstance(user_content, list)
+    if vision:
+        parsed = _process_json(messages, row["content"], user_content)
+        if parsed is None:
+            return {"ai_state": "error", "reply": "saved (AI could not process the image — retry available)"}
+        summary, category, reminders, memories = parsed
+    else:
         try:
-            fb = _nim_call([
-                {"role": "system", "content": "Reply with ONLY minified JSON: "
-                 f'{{"summary": str, "category": one of {CATEGORIES}, '
-                 'reminders": [{"text": str, "due_at": iso}] or [], '
-                 'memories": [{"key": str, "value": str}] or []}}'},
-                {"role": "user", "content": row["content"]},
-            ])
-            parsed = json.loads(fb["choices"][0]["message"]["content"].strip())
-            summary = parsed.get("summary")
-            category = parsed.get("category")
-            reminders = [(r["text"], _fix_due_at(r["due_at"]))
-                         for r in parsed.get("reminders", [])]
-            memories = [(m["key"], m["value"]) for m in parsed.get("memories", [])]
-        except Exception:
-            return {"ai_state": "error", "reply": "saved (AI could not process this one — retry available)"}
+            resp = _nim_call(messages, tools=TOOLS)
+            msg = resp["choices"][0]["message"]
+        except Exception as e:  # network / 5xx / rate-limit — retry-once later
+            return {"ai_state": "queued-retry", "reply": f"saved (AI hiccup: {str(e)[:80]} — will retry)"}
+
+        summary = category = None
+        reminders, memories = [], []
+
+        for call in msg.get("tool_calls") or []:
+            fn, args = call["function"]["name"], json.loads(call["function"]["arguments"] or "{}")
+            if fn == "capture.update":
+                summary, category = args.get("summary"), args.get("category")
+            elif fn == "reminder.create":
+                reminders.append((args.get("text", ""), _fix_due_at(args.get("due_at", ""))))
+            elif fn == "memory.write":
+                memories.append((args.get("key", ""), args.get("value", "")))
+
+        if not summary:  # model ignored tools — strict JSON fallback
+            summary, category, reminders, memories = _json_turn(row["content"], messages[0])
+            if summary is None:
+                return {"ai_state": "error", "reply": "saved (AI could not process this one — retry available)"}
 
     conn = _db()
     if category not in CATEGORIES:

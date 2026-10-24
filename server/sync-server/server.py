@@ -31,6 +31,8 @@ TOKEN_PATH = os.path.join(DATA_DIR, "token")
 CERT_PATH = os.environ.get("PERIHEL_SYNC_CERT", os.path.join(DATA_DIR, "cert.pem"))
 KEY_PATH = os.environ.get("PERIHEL_SYNC_KEY", os.path.join(DATA_DIR, "key.pem"))
 PORT = int(os.environ.get("PERIHEL_SYNC_PORT", "8443"))
+MEDIA_DIR = os.path.join(DATA_DIR, "media")
+MAX_MEDIA_BYTES = 20 * 1024 * 1024  # hard cap for image/video attachments
 
 with open(TOKEN_PATH) as f:
     AUTH_TOKEN = f.read().strip()
@@ -89,6 +91,9 @@ MIGRATIONS = [
     ("captures", "ai_attempts", "INTEGER DEFAULT 0"),
     ("captures", "due_at", "TEXT"),
     ("captures", "deleted_at", "TEXT"),
+    ("captures", "media_id", "TEXT"),
+    ("captures", "media_type", "TEXT"),
+    ("captures", "media_size", "INTEGER"),
 ]
 
 
@@ -127,6 +132,9 @@ def row_to_capture(row) -> dict:
         "due_at": row["due_at"],
         "updated_at": row["updated_at"],
         "deleted": bool(row["deleted"]),
+        "media_id": row["media_id"],
+        "media_type": row["media_type"],
+        "media_size": row["media_size"],
     }
 
 
@@ -148,20 +156,25 @@ def upsert_capture(conn: sqlite3.Connection, cap: dict):
     conn.execute(
         """INSERT INTO captures
            (uuid, content, content_type, status, created_at, scheduled_at,
-            ai_summary, agent_used, updated_at, deleted, category, ai_state, due_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ai_summary, agent_used, updated_at, deleted, category, ai_state, due_at,
+            media_id, media_type, media_size)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(uuid) DO UPDATE SET
              content=excluded.content, content_type=excluded.content_type,
              status=excluded.status, created_at=excluded.created_at,
-             scheduled_at=excluded.scheduled_at, ai_summary=excluded.ai_summary,
+             scheduled_at=excluded.scheduled_at,
+             ai_summary=excluded.ai_summary,
              agent_used=excluded.agent_used, updated_at=excluded.updated_at,
              deleted=excluded.deleted, category=excluded.category,
-             ai_state=excluded.ai_state, due_at=excluded.due_at""",
+             ai_state=excluded.ai_state, due_at=excluded.due_at,
+             media_id=excluded.media_id, media_type=excluded.media_type,
+             media_size=excluded.media_size""",
         (cap_uuid, str(cap.get("content", "")), str(cap.get("content_type", "text")),
          str(cap.get("status", "pending")), str(cap.get("created_at") or now_utc()),
          cap.get("scheduled_at"), cap.get("ai_summary"), cap.get("agent_used"),
          updated, 1 if cap.get("deleted") else 0, cap.get("category"),
-         cap.get("ai_state"), cap.get("due_at")))
+         cap.get("ai_state"), cap.get("due_at"),
+         cap.get("media_id"), cap.get("media_type"), cap.get("media_size")))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -217,7 +230,27 @@ class Handler(BaseHTTPRequestHandler):
             with _db_lock, db() as conn:
                 settings = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings")}
             return self._json(200, settings)
+        if url.path.startswith("/v1/media/"):
+            return self._serve_media(url.path.rsplit("/", 1)[-1])
         return self._json(404, {"error": "not found"})
+
+    def _serve_media(self, media_id: str):
+        safe = "".join(c for c in media_id if c.isalnum() or c in "._-")
+        path = os.path.join(MEDIA_DIR, safe)
+        if not safe or not os.path.isfile(path):
+            return self._json(404, {"error": "no such media"})
+        ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                 "webp": "image/webp", "gif": "image/gif", "heic": "image/heic",
+                 "mp4": "video/mp4", "webm": "video/webm", "3gp": "video/3gpp",
+                 "mov": "video/quicktime"}.get(safe.rsplit(".", 1)[-1].lower(),
+                                               "application/octet-stream")
+        with open(path, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     # ---------------- POST ----------------
 
@@ -256,27 +289,60 @@ class Handler(BaseHTTPRequestHandler):
                     (cap_uuid,))
             return self._json(200, {"ok": True, "uuid": cap_uuid})
 
+        if url.path == "/v1/media":
+            return self._upload_media()
+
         return self._json(404, {"error": "not found"})
+
+    def _upload_media(self):
+        """Raw binary body; ?filename= gives the extension. Enforces the cap."""
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return self._json(400, {"error": "empty body"})
+        if length > MAX_MEDIA_BYTES:
+            return self._json(413, {"error": f"file too large (max {MAX_MEDIA_BYTES // (1024*1024)} MB)"})
+        data = self.rfile.read(length)
+        filename = parse_qs(urlparse(self.path).query).get("filename", ["attach"])[0]
+        ext = "".join(c for c in filename.rsplit(".", 1)[-1].lower() if c.isalnum())[:5] or "bin"
+        media_id = f"{uuidlib.uuid4().hex}.{ext}"
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        with open(os.path.join(MEDIA_DIR, media_id), "wb") as f:
+            f.write(data)
+        kind = "video" if ext in ("mp4", "webm", "3gp", "mov") else "image"
+        return self._json(200, {"id": media_id, "size": length, "kind": kind})
 
     # ---------------- chat ----------------
 
     def _chat(self):
-        """Save first (always), then AI. AI failure never loses the capture."""
+        """Save first (always), then AI. AI failure never loses the capture.
+        Optional: media (uploaded via /v1/media) and a base64 thumbnail
+        data-URI the vision model can actually look at."""
         try:
             body = self._body()
             content = str(body.get("content", "")).strip()
             wants_ai = bool(body.get("ai", True))
+            media = body.get("media") or {}
         except (ValueError, json.JSONDecodeError):
             return self._json(400, {"error": "bad json"})
-        if not content:
+        media_id = str(media.get("id") or "") or None
+        thumb = str(media.get("thumb") or "") or None
+        if thumb and not thumb.startswith("data:image/"):
+            thumb = None
+        if not content and not media_id:
             return self._json(400, {"error": "empty content"})
+        if media_id:
+            content = content or "(media attachment)"
 
         cap_uuid = str(uuidlib.uuid4())
         created = now_utc()
-        cap = {"uuid": cap_uuid, "content": content, "content_type": guess_type(content),
+        content_type = "video" if media.get("kind") == "video" else \
+                       ("image" if media_id else guess_type(content))
+        cap = {"uuid": cap_uuid, "content": content, "content_type": content_type,
                "status": "pending", "created_at": created, "updated_at": created,
                "scheduled_at": None, "ai_summary": None, "category": None,
-               "ai_state": None, "due_at": None, "deleted": False}
+               "ai_state": None, "due_at": None, "deleted": False,
+               "media_id": media_id, "media_type": media.get("kind"),
+               "media_size": media.get("size")}
         with _db_lock, db() as conn:
             upsert_capture(conn, cap)  # SAVED — the thought is safe from here
 
@@ -288,7 +354,7 @@ class Handler(BaseHTTPRequestHandler):
 
         import ai as ai_mod
         try:
-            result = ai_mod.process_capture(cap_uuid)
+            result = ai_mod.process_capture(cap_uuid, thumb_data_uri=thumb)
         except Exception as e:
             result = {"ai_state": "error", "reply": f"saved (AI error: {str(e)[:80]})"}
 
