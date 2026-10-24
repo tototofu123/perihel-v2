@@ -69,7 +69,7 @@ def _nim_call(messages, tools=None):
     wait = MIN_CALL_GAP_S - (time.time() - _last_call)
     if wait > 0:
         time.sleep(wait)
-    body = {"model": MODEL, "messages": messages, "max_tokens": 700,
+    body = {"model": MODEL, "messages": messages, "max_tokens": 450,
             "temperature": 0.3, "stream": False}
     if tools:
         body["tools"] = tools

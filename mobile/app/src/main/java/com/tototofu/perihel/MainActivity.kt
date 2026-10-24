@@ -62,6 +62,25 @@ class Config(ctx: Context) {
     var aiEnabled: Boolean
         get() = prefs.getBoolean("ai_enabled", true)  // default AI ON
         set(v) = prefs.edit().putBoolean("ai_enabled", v).apply()
+
+    // chat history survives app restarts (last 100 messages, JSON in prefs)
+    fun loadChat(): List<ChatMsg> = try {
+        val arr = org.json.JSONArray(prefs.getString("chat", "[]"))
+        (0 until arr.length()).map {
+            val o = arr.getJSONObject(it)
+            ChatMsg(o.getString("who"), o.getString("text"), o.optString("extra"))
+        }
+    } catch (_: Exception) { emptyList() }
+
+    fun saveChat(messages: List<ChatMsg>) {
+        val arr = org.json.JSONArray()
+        messages.takeLast(100).forEach {
+            arr.put(org.json.JSONObject().put("who", it.who).put("text", it.text)
+                .put("extra", it.extra))
+        }
+        prefs.edit().putString("chat", arr.toString()).apply()
+    }
+
     val isConfigured: Boolean get() = url.isNotBlank() && token.isNotBlank()
 }
 
@@ -145,10 +164,19 @@ data class ChatMsg(val who: String, val text: String, val extra: String = "")
 @Composable
 fun ChatTab(config: Config, onDisconnect: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var messages by remember { mutableStateOf(listOf(ChatMsg("perihel",
-        "Send me a thought — I'll remember it, understand it, and remind you when it matters."))) }
+    var messages by remember {
+        mutableStateOf(config.loadChat().ifEmpty {
+            listOf(ChatMsg("perihel",
+                "Send me a thought — I'll remember it, understand it, and remind you when it matters."))
+        })
+    }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+
+    fun append(msg: ChatMsg) {
+        messages = messages + msg
+        config.saveChat(messages)
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -204,7 +232,7 @@ fun ChatTab(config: Config, onDisconnect: () -> Unit) {
                 if (text.isNotEmpty() && !busy) {
                     input = ""
                     busy = true
-                    messages = messages + ChatMsg("you", text)
+                    append(ChatMsg("you", text))
                     scope.launch {
                         var result: SyncApi.ChatResult? = null
                         var error: String? = null
@@ -233,7 +261,7 @@ fun ChatTab(config: Config, onDisconnect: () -> Unit) {
                                 }
                             }
                         }
-                        messages = messages + ChatMsg("perihel", reply, extra)
+                        append(ChatMsg("perihel", reply, extra))
                     }
                 }
             }, enabled = !busy) { Text(if (busy) "…" else "➤") }
