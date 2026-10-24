@@ -1,55 +1,69 @@
 # Perihel
 
-_A local-first capture companion — desktop app, Android companion, and a tiny
-self-hosted sync server. Everything runs on free tiers; nothing phones home
-except to your own VM._
+_A capture companion that understands your thoughts — desktop app, Android
+app, and a tiny self-hosted AI server. Everything runs on free tiers; your
+data lives on your own VM._
 
 ```
-desktop/   Rust workspace — the main app (egui), hold-RightCtrl dictation
-           (sherpa-onnx), local/remote LLM copilot, smart resurfacing
-mobile/    Kotlin + Jetpack Compose Android companion (sync API client)
-server/    Python stdlib sync server + ntfy push, Caddy TLS, systemd units,
-           PRIVATE deployment values in server/local.env (gitignored)
-ops/       budget kill-switch Cloud Function (stops the VM if GCP ever bills)
-docs/      SELF-HOST.md — rebuild the whole VM stack from scratch, $0/month
+desktop/   Rust workspace — egui app, hold-RightCtrl dictation (sherpa-onnx),
+           local/remote LLM copilot, capture resurfacing
+mobile/    Kotlin + Compose Android app — AI chat capture, filterable
+           logbook, alerts
+server/    Python sync server + AI processor (NVIDIA NIM tool calling,
+           long-term memory, reminders), Caddy TLS, systemd units
+ops/       budget kill-switch Cloud Function (auto-stops the VM if the
+           cloud bill ever crosses HK$0.01)
+docs/      SELF-HOST.md — rebuild the whole stack from scratch, $0/month
 ```
 
-## What it does
+## How it works
 
-- **Capture** (`Ctrl+Shift+P` on desktop, text field on mobile): dump a
-  thought/URL/screenshot; it resurfaces 1–4 h later as a notification — on the
-  desktop, and on your phone via ntfy even when the PC is off.
-- **Dictate** (hold Right Ctrl): on-device STT injected into whatever app has
-  focus. No cloud.
-- **Copilot** (`Ctrl+Shift+K`): tool-calling LLM — remote free API (NVIDIA NIM)
-  or local `.gguf` sidecar, GBNF-constrained locally.
-- **Sync**: additive, offline-first. Local SQLite is the source of truth on
-  every device; the VM relay merges by last-write-wins.
+You send a thought — on the phone's chat, or `Ctrl+Shift+P` on the desktop:
+
+1. **It is saved first.** The capture hits the server's SQLite before any AI
+   call, so a dead API can never lose a thought.
+2. **AI processes it** (toggleable, default on): expands what you meant,
+   assigns a category (`idea · todo · link · note · question · person ·
+   event`), extracts reminders when you mention a time, and files durable
+   facts about you into long-term memory that improves future processing.
+3. **It resurfaces at the right moment**: your explicit reminders fire at
+   their time (any hour); smart nudges arrive at most every 4 hours, only
+   during active hours (default 09:00–21:00), via ntfy pushes to your phone.
+4. **Everything syncs** — phone, desktop, and server converge by
+   last-write-wins; each device keeps a full local copy and works offline.
+   Deleting is a 30-day soft delete, recoverable from the server DB.
+
+## Stack
+
+- **Desktop** — Rust, egui, sherpa-onnx (on-device STT), llama.cpp sidecar
+  for the offline copilot, NVIDIA NIM (free API) for the cloud copilot.
+- **Server** — Python stdlib only (no pip on the VM): HTTPS via Caddy +
+  Let's Encrypt, bearer-token auth, SQLite. AI via NVIDIA NIM's
+  OpenAI-compatible API with tool calls; a rate limiter and retry-once
+  policy protect the free tier.
+- **Mobile** — Kotlin + Jetpack Compose, zero networking dependencies.
+- **Hosting** — GCP always-free e2-micro, free static IP, sslip.io domain,
+  budget alert at HK$0.01 wired to a Cloud Function that stops the VM.
 
 ## Quick start
 
-**Desktop** — see `desktop/README.md` (build with `build.ps1`, models via
-`desktop/scripts/download-models.ps1`).
+**Desktop** — see `desktop/README.md`.
 
-**Mobile** — needs the Android SDK (free):
+**Mobile** — needs the Android SDK:
 
 ```bash
 cd mobile
-./gradlew assembleDebug -PPERIHEL_URL=https://your-vm.sslip.io -PPERIHEL_TOKEN=yourtoken
-# APK at app/build/outputs/apk/debug/ — sideload it
+./gradlew assembleDebug -PPERIHEL_URL=https://your-vm -PPERIHEL_TOKEN=yourtoken
+# APK at app/build/outputs/apk/debug/ — or just launch it and enter URL+token
 ```
 
-(Or launch the app and enter URL + token on the setup screen.)
-
-**Server** — `docs/SELF-HOST.md` walks the whole thing: GCP always-free VM,
-real TLS via sslip.io + Caddy, budget kill-switch, phone pushes. The private
-values for the live deployment live in `server/local.env` (never committed).
+**Server** — `docs/SELF-HOST.md` walks through the whole free-tier build.
 
 ## Principles
 
-- **Free forever** — every component sits on an always-free tier; a HK$0.01
-  budget alert + auto-kill Cloud Function guards the meter.
+- **Free forever** — every component sits on an always-free tier, guarded by
+  a HK$0.01 budget alert + auto-kill.
+- **Save first, think second** — no AI failure can lose a capture.
 - **Local-first** — sync is additive; offline Perihel is complete Perihel.
-- **Nothing heavy stays resident** — sidecars load, do one job, exit.
 
 MIT
