@@ -65,11 +65,13 @@ On the VM (`gcloud compute ssh perihel-sync --zone=us-west1-b`):
 
 ```bash
 sudo mkdir -p /opt/perihel-sync && cd /opt/perihel-sync
-sudo cp ~/server.py ~/ntfy_push.py .            # from server/sync-server/ in this repo
+sudo cp ~/server.py ~/ai.py ~/tick.py .            # from server/sync-server/ in this repo
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 \
   -nodes -subj "/CN=perihel-sync" -addext "subjectAltName=IP:YOUR_VM_IP"
 openssl rand -hex 32 | sudo tee token           # bearer token — the password
 openssl rand -hex 4 | sed "s/^/perihel-/" | sudo tee ntfy-topic
+# NVIDIA NIM key (free at build.nvidia.com) — the only file with a secret:
+cat > nim.key   # paste key, then: chmod 600 nim.key
 sudo chmod 600 key.pem token ntfy-topic
 ```
 

@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""Perihel sync server — thin relay for captures, runs on the free-tier e2-micro.
+"""Perihel sync server — thin relay + AI chat gateway, free-tier e2-micro VM.
 
-Local SQLite stays the source of truth on each device; this service is the
-meeting point. Protocol (all JSON, bearer-token auth, TLS via self-signed cert):
+All inference is remote (NVIDIA NIM); this process only orchestrates.
 
-  GET  /v1/health                      -> {"ok": true, "server_time": ...}
-  GET  /v1/captures?since=<rfc3339>    -> rows with updated_at > since (tombstones included)
-  POST /v1/captures {"captures": [...]}-> last-write-wins upsert by updated_at
-
-Standard library only — no pip, nothing to break on a 1 GB Debian box.
+  GET  /v1/health
+  GET  /v1/captures?since=<rfc3339>     -> rows (tombstones included)
+  POST /v1/captures {"captures": [...]} -> last-write-wins upsert
+  POST /v1/chat {"content": str, "ai": bool}
+                                       -> ALWAYS saves the capture first,
+                                          then runs AI (rate-limited) and
+                                          returns {capture, ai}
+  POST /v1/captures/delete {"uuid": ..} -> 30-day soft delete (tombstone)
+  POST /v1/captures/retry  {"uuid": ..} -> requeue AI processing
+  GET  /v1/reminders                    -> upcoming + recent reminder history
+  GET  /v1/settings                     -> notification config (client-facing)
 """
 import json
 import os
 import sqlite3
 import ssl
 import threading
+import uuid as uuidlib
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -43,14 +49,47 @@ CREATE TABLE IF NOT EXISTS captures (
     agent_used TEXT,
     updated_at TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0,
-    notified INTEGER NOT NULL DEFAULT 0
+    notified INTEGER NOT NULL DEFAULT 0,
+    category TEXT,
+    ai_state TEXT,
+    ai_attempts INTEGER DEFAULT 0,
+    due_at TEXT,
+    deleted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_captures_updated ON captures (updated_at);
 CREATE INDEX IF NOT EXISTS idx_captures_due ON captures (status, scheduled_at);
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    fired_at TEXT,
+    capture_uuid TEXT
+);
+CREATE TABLE IF NOT EXISTS memory (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO settings (key, value) VALUES ('active_start', '09:00');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('active_end', '21:00');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('nudge_interval_hours', '4');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('last_nudge_at', '');
 """
 
-FIELDS = ["content", "content_type", "status", "created_at",
-          "scheduled_at", "ai_summary", "agent_used"]
+# columns added after the first deployment, idempotent
+MIGRATIONS = [
+    ("captures", "category", "TEXT"),
+    ("captures", "ai_state", "TEXT"),
+    ("captures", "ai_attempts", "INTEGER DEFAULT 0"),
+    ("captures", "due_at", "TEXT"),
+    ("captures", "deleted_at", "TEXT"),
+]
 
 
 def now_utc() -> str:
@@ -63,6 +102,17 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def init_db():
+    conn = db()
+    conn.executescript(SCHEMA)
+    for table, column, decl in MIGRATIONS:
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.commit()
+    conn.close()
+
+
 def row_to_capture(row) -> dict:
     return {
         "uuid": row["uuid"],
@@ -72,10 +122,46 @@ def row_to_capture(row) -> dict:
         "created_at": row["created_at"],
         "scheduled_at": row["scheduled_at"],
         "ai_summary": row["ai_summary"],
-        "agent_used": row["agent_used"],
+        "category": row["category"],
+        "ai_state": row["ai_state"],
+        "due_at": row["due_at"],
         "updated_at": row["updated_at"],
         "deleted": bool(row["deleted"]),
     }
+
+
+def guess_type(content: str) -> str:
+    lowered = content.lower()
+    if lowered.startswith(("http://", "https://")) or " www." in lowered:
+        return "url"
+    return "text"
+
+
+def upsert_capture(conn: sqlite3.Connection, cap: dict):
+    cap_uuid = str(cap.get("uuid", "")).strip()
+    if not cap_uuid:
+        return
+    updated = str(cap.get("updated_at") or cap.get("created_at") or now_utc())
+    existing = conn.execute("SELECT updated_at FROM captures WHERE uuid = ?", (cap_uuid,)).fetchone()
+    if existing and existing["updated_at"] >= updated:
+        return  # server copy newer — last write wins
+    conn.execute(
+        """INSERT INTO captures
+           (uuid, content, content_type, status, created_at, scheduled_at,
+            ai_summary, agent_used, updated_at, deleted, category, ai_state, due_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(uuid) DO UPDATE SET
+             content=excluded.content, content_type=excluded.content_type,
+             status=excluded.status, created_at=excluded.created_at,
+             scheduled_at=excluded.scheduled_at, ai_summary=excluded.ai_summary,
+             agent_used=excluded.agent_used, updated_at=excluded.updated_at,
+             deleted=excluded.deleted, category=excluded.category,
+             ai_state=excluded.ai_state, due_at=excluded.due_at""",
+        (cap_uuid, str(cap.get("content", "")), str(cap.get("content_type", "text")),
+         str(cap.get("status", "pending")), str(cap.get("created_at") or now_utc()),
+         cap.get("scheduled_at"), cap.get("ai_summary"), cap.get("agent_used"),
+         updated, 1 if cap.get("deleted") else 0, cap.get("category"),
+         cap.get("ai_state"), cap.get("due_at")))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -95,6 +181,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    # ---------------- GET ----------------
+
     def do_GET(self):
         if not self._auth():
             return self._json(401, {"error": "unauthorized"})
@@ -113,70 +205,130 @@ class Handler(BaseHTTPRequestHandler):
                         "SELECT * FROM captures ORDER BY updated_at ASC").fetchall()
             return self._json(200, {"server_time": now_utc(),
                                     "captures": [row_to_capture(r) for r in rows]})
+        if url.path == "/v1/reminders":
+            with _db_lock, db() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM reminders ORDER BY due_at DESC LIMIT 50").fetchall()
+                settings = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings")}
+            return self._json(200, {"server_time": now_utc(),
+                                    "reminders": [dict(r) for r in rows],
+                                    "settings": settings})
+        if url.path == "/v1/settings":
+            with _db_lock, db() as conn:
+                settings = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings")}
+            return self._json(200, settings)
         return self._json(404, {"error": "not found"})
+
+    # ---------------- POST ----------------
 
     def do_POST(self):
         if not self._auth():
             return self._json(401, {"error": "unauthorized"})
         url = urlparse(self.path)
-        if url.path != "/v1/captures":
-            return self._json(404, {"error": "not found"})
+
+        if url.path == "/v1/chat":
+            return self._chat()
+
+        if url.path == "/v1/captures":
+            try:
+                incoming = self._body().get("captures", [])
+            except (ValueError, json.JSONDecodeError):
+                return self._json(400, {"error": "bad json"})
+            with _db_lock, db() as conn:
+                for cap in incoming:
+                    upsert_capture(conn, cap)
+            return self._json(200, {"server_time": now_utc()})
+
+        if url.path == "/v1/captures/delete":
+            cap_uuid = self._body().get("uuid", "")
+            with _db_lock, db() as conn:
+                conn.execute(
+                    "UPDATE captures SET deleted = 1, deleted_at = ?, updated_at = ? WHERE uuid = ?",
+                    (now_utc(), now_utc(), cap_uuid))
+            return self._json(200, {"ok": True, "uuid": cap_uuid,
+                                    "note": "soft-deleted; purged after 30 days"})
+
+        if url.path == "/v1/captures/retry":
+            cap_uuid = self._body().get("uuid", "")
+            with _db_lock, db() as conn:
+                conn.execute(
+                    "UPDATE captures SET ai_state = 'queued', ai_attempts = 0 WHERE uuid = ?",
+                    (cap_uuid,))
+            return self._json(200, {"ok": True, "uuid": cap_uuid})
+
+        return self._json(404, {"error": "not found"})
+
+    # ---------------- chat ----------------
+
+    def _chat(self):
+        """Save first (always), then AI. AI failure never loses the capture."""
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = json.loads(self.rfile.read(length))
-            incoming = body.get("captures", [])
+            body = self._body()
+            content = str(body.get("content", "")).strip()
+            wants_ai = bool(body.get("ai", True))
         except (ValueError, json.JSONDecodeError):
             return self._json(400, {"error": "bad json"})
+        if not content:
+            return self._json(400, {"error": "empty content"})
 
-        accepted = []
+        cap_uuid = str(uuidlib.uuid4())
+        created = now_utc()
+        cap = {"uuid": cap_uuid, "content": content, "content_type": guess_type(content),
+               "status": "pending", "created_at": created, "updated_at": created,
+               "scheduled_at": None, "ai_summary": None, "category": None,
+               "ai_state": None, "due_at": None, "deleted": False}
         with _db_lock, db() as conn:
-            for cap in incoming:
-                uuid = str(cap.get("uuid", "")).strip()
-                if not uuid:
-                    continue
-                updated = str(cap.get("updated_at") or cap.get("created_at") or now_utc())
-                existing = conn.execute(
-                    "SELECT updated_at FROM captures WHERE uuid = ?", (uuid,)).fetchone()
-                if existing and existing["updated_at"] >= updated:
-                    continue  # server copy is newer — last write wins
+            upsert_capture(conn, cap)  # SAVED — the thought is safe from here
+
+        if not wants_ai:
+            return self._json(200, {"capture": cap, "ai": None})
+
+        with _db_lock, db() as conn:
+            conn.execute("UPDATE captures SET ai_state = 'queued' WHERE uuid = ?", (cap_uuid,))
+
+        import ai as ai_mod
+        try:
+            result = ai_mod.process_capture(cap_uuid)
+        except Exception as e:
+            result = {"ai_state": "error", "reply": f"saved (AI error: {str(e)[:80]})"}
+
+        if result["ai_state"] == "queued-retry":  # the timer retries exactly once
+            with _db_lock, db() as conn:
                 conn.execute(
-                    """INSERT INTO captures
-                       (uuid, content, content_type, status, created_at, scheduled_at,
-                        ai_summary, agent_used, updated_at, deleted)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(uuid) DO UPDATE SET
-                         content=excluded.content, content_type=excluded.content_type,
-                         status=excluded.status, created_at=excluded.created_at,
-                         scheduled_at=excluded.scheduled_at, ai_summary=excluded.ai_summary,
-                         agent_used=excluded.agent_used, updated_at=excluded.updated_at,
-                         deleted=excluded.deleted""",
-                    (uuid,
-                     str(cap.get("content", "")),
-                     str(cap.get("content_type", "text")),
-                     str(cap.get("status", "pending")),
-                     str(cap.get("created_at") or now_utc()),
-                     cap.get("scheduled_at"),
-                     cap.get("ai_summary"),
-                     cap.get("agent_used"),
-                     updated,
-                     1 if cap.get("deleted") else 0))
-                accepted.append(uuid)
-        return self._json(200, {"server_time": now_utc(), "accepted": accepted})
+                    "UPDATE captures SET ai_state = 'queued', ai_attempts = 1 WHERE uuid = ?",
+                    (cap_uuid,))
+            return self._json(200, {"capture": cap,
+                                    "ai": {"state": "retrying", "reply": result["reply"]}})
+
+        state = result["ai_state"]
+        with _db_lock, db() as conn:
+            if state == "done":
+                row = conn.execute("SELECT * FROM captures WHERE uuid = ?", (cap_uuid,)).fetchone()
+                return_val = {"capture": row_to_capture(row),
+                              "ai": {"state": "done", "reply": result.get("reply", ""),
+                                     "category": result.get("category"),
+                                     "reminders": [{"text": t, "due_at": d}
+                                                   for t, d in result.get("reminders", [])]}}
+            else:
+                conn.execute("UPDATE captures SET ai_state = ? WHERE uuid = ?", (state, cap_uuid))
+                return_val = {"capture": cap,
+                              "ai": {"state": state, "reply": result.get("reply", "")}}
+        return self._json(200, return_val)
 
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
-    with _db_lock, db() as conn:
-        conn.executescript(SCHEMA)
-
+    init_db()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     use_tls = os.environ.get("PERIHEL_SYNC_NO_TLS") != "1"
     if use_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(CERT_PATH, KEY_PATH)
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-    mode = "TLS" if use_tls else "plain HTTP (behind reverse proxy)"
-    print(f"perihel-sync listening on :{PORT} ({mode}, token auth)", flush=True)
+    print(f"perihel-sync listening on :{PORT} ({'TLS' if use_tls else 'plain'}, token auth, AI on)",
+          flush=True)
+    import ai as _ai  # fail fast at startup if the module or key is broken
+    print(f"AI model: {_ai.MODEL}", flush=True)
     httpd.serve_forever()
 
 
