@@ -19,7 +19,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -98,7 +100,8 @@ fun SetupScreen(config: Config, onDone: () -> Unit) {
                         config.token = token.trim()
                         onDone()
                     } catch (e: Exception) {
-                        message = e.message ?: "connection failed"
+                        android.util.Log.e("SyncApi", "connect failed", e)
+                        message = e.message ?: e.toString()
                     }
                 }
             },
@@ -118,14 +121,16 @@ fun CapturesScreen(config: Config, onDisconnect: () -> Unit) {
         scope.launch {
             status = "syncing…"
             try {
-                captures = SyncApi.pullCaptures(config.url, config.token)
-                    .sortedByDescending { it.createdAt }
+                captures = withContext(Dispatchers.IO) {
+                    SyncApi.pullCaptures(config.url, config.token)
+                }.sortedByDescending { it.createdAt }
                 status = "${captures.count { it.status == "pending" }} pending"
             } catch (e: SyncApi.AuthError) {
                 status = "token rejected — reconnect"
                 onDisconnect()
             } catch (e: Exception) {
-                status = e.message ?: "sync failed"
+                android.util.Log.e("SyncApi", "sync failed", e)
+                status = e.message ?: e.toString()
             }
         }
     }
@@ -149,7 +154,9 @@ fun CapturesScreen(config: Config, onDisconnect: () -> Unit) {
                 if (newCapture.isNotBlank()) {
                     scope.launch {
                         try {
-                            SyncApi.addCapture(config.url, config.token, newCapture.trim())
+                            withContext(Dispatchers.IO) {
+                                SyncApi.addCapture(config.url, config.token, newCapture.trim())
+                            }
                             newCapture = ""
                             refresh()
                         } catch (e: Exception) { status = e.message ?: "add failed" }
@@ -164,8 +171,10 @@ fun CapturesScreen(config: Config, onDisconnect: () -> Unit) {
                 CaptureRow(cap) {
                     scope.launch {
                         try {
-                            SyncApi.setStatus(config.url, config.token, cap,
-                                if (cap.status == "pending") "done" else "pending")
+                            withContext(Dispatchers.IO) {
+                                SyncApi.setStatus(config.url, config.token, cap,
+                                    if (cap.status == "pending") "done" else "pending")
+                            }
                             refresh()
                         } catch (e: Exception) { status = e.message ?: "update failed" }
                     }
