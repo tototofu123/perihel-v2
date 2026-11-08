@@ -61,6 +61,29 @@ gcloud compute addresses create perihel-ip --region=us-west1 \
 
 ## 3. Sync server + Caddy (real TLS, free domain)
 
+### Deploying updates
+
+Use the deploy script from a checkout of this repo:
+
+```bash
+ops/deploy.sh                 # deploy, restart, health-check, queue depth
+ops/deploy.sh --dry-run       # print every command without running any
+```
+
+It copies `server/sync-server/*.py` and `server/systemd/*` to the VM,
+restarts `perihel-sync` (and `perihel-telegram` if it is enabled),
+smoke-tests `GET /v1/health` (retried up to 6 times, 5 s apart), and
+reports the AI queue depth (captures with `ai_state='queued'`). It
+refuses to run with uncommitted changes to the files it deploys, so a
+deploy always matches a committed tree (`--allow-dirty` overrides).
+It never copies or prints a secret file, and it leaves the ntfy units
+alone — the tick timer wiring is issue #10's scope. Defaults are the
+`perihel-sync` VM in `us-west1-b`; override with `--instance`,
+`--zone`, `--project` (or `PERIHEL_INSTANCE` / `PERIHEL_ZONE` /
+`PERIHEL_GCP_PROJECT`).
+
+### First install (manual fallback)
+
 On the VM (`gcloud compute ssh perihel-sync --zone=us-west1-b`):
 
 ```bash
