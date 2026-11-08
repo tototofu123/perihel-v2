@@ -85,9 +85,13 @@ def nim_usage() -> dict:
 
 CATEGORIES = ["idea", "todo", "link", "note", "question", "person", "event"]
 
+# Tool names use underscores only: the OpenAI function-calling spec allows
+# only a-z, A-Z, 0-9, underscores and dashes. Dotted names worked with
+# DeepSeek but strict providers reject them — MiniMax returns HTTP 400
+# 'Function at index 0 has an invalid name: "capture.update"'.
 TOOLS = [
     {"type": "function", "function": {
-        "name": "capture.update",
+        "name": "capture_update",
         "description": "Record your analysis of the user's thought: a 1-3 sentence expansion and a category.",
         "parameters": {"type": "object", "properties": {
             "summary": {"type": "string", "description": "1-3 sentence expansion of what the user meant, context and why it matters"},
@@ -95,7 +99,7 @@ TOOLS = [
         }, "required": ["summary", "category"]},
     }},
     {"type": "function", "function": {
-        "name": "reminder.create",
+        "name": "reminder_create",
         "description": "Create a reminder ONLY if the thought references a time/deadline ('call mom Sunday', 'submit at 6pm', 'before Friday').",
         "parameters": {"type": "object", "properties": {
             "text": {"type": "string"},
@@ -103,7 +107,7 @@ TOOLS = [
         }, "required": ["text", "due_at"]},
     }},
     {"type": "function", "function": {
-        "name": "memory.write",
+        "name": "memory_write",
         "description": "Persist a durable fact about the user worth remembering in future conversations (interests, projects, weekly routines). Max ~20 memories.",
         "parameters": {"type": "object", "properties": {
             "key": {"type": "string"}, "value": {"type": "string"},
@@ -238,9 +242,9 @@ def _memory_block(conn) -> str:
 
 SYSTEM_PROMPT = """You are Perihel, the user's thought companion. The user sends raw, fleeting thoughts. Process each one:
 
-1. capture.update — expand the thought: what they meant, the context, why it might matter.
-2. reminder.create — ONLY when the thought names a time, deadline or occasion.
-3. memory.write — when the thought reveals a durable fact about the user's life, studies, projects or routines.
+1. capture_update — expand the thought: what they meant, the context, why it might matter.
+2. reminder_create — ONLY when the thought names a time, deadline or occasion.
+3. memory_write — when the thought reveals a durable fact about the user's life, studies, projects or routines.
 
 What you know about the user so far:
 {memory}
@@ -304,11 +308,12 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
 
         for call in msg.get("tool_calls") or []:
             fn, args = call["function"]["name"], json.loads(call["function"]["arguments"] or "{}")
-            if fn == "capture.update":
+            # Accept the old dotted names too, in case a model returns them.
+            if fn in ("capture_update", "capture.update"):
                 summary, category = args.get("summary"), args.get("category")
-            elif fn == "reminder.create":
+            elif fn in ("reminder_create", "reminder.create"):
                 reminders.append((args.get("text", ""), _fix_due_at(args.get("due_at", ""))))
-            elif fn == "memory.write":
+            elif fn in ("memory_write", "memory.write"):
                 memories.append((args.get("key", ""), args.get("value", "")))
 
         if not summary:  # model ignored tools — strict JSON fallback
