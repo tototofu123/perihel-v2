@@ -185,7 +185,7 @@ def load_state(conn) -> dict:
         state["state"] = values["watchdog_state"]
     state["since"] = parse_ts(values.get("watchdog_state_since"))
     try:
-        state["error_count"] = int(values["watchdog_error_count"])
+        state["error_count"] = int(values.get("watchdog_error_count"))
     except (TypeError, ValueError):
         state["error_count"] = None
     return state
