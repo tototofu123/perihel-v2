@@ -14,6 +14,12 @@ All inference is remote (NVIDIA NIM); this process only orchestrates.
                                           this one call only (the Telegram
                                           bot passes PERIHEL_BOT_MODEL);
                                           omitted means the server default.
+  POST /v1/search {"query": str} | {"url": str}  -> web search or page
+                                          fetch, optional "summarise": bool,
+                                          "model": str (per-call override,
+                                          same rule as /v1/chat),
+                                          "max_results": 1-10 (default 5).
+                                          Rate-limited: 429 + retry_after.
   POST /v1/captures/delete {"uuid": ..} -> 30-day soft delete (tombstone)
   POST /v1/captures/retry  {"uuid": ..} -> requeue AI processing
   GET  /v1/reminders                    -> upcoming + recent reminder history
@@ -266,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/v1/chat":
             return self._chat()
 
+        if url.path == "/v1/search":
+            return self._search()
+
         if url.path == "/v1/captures":
             try:
                 incoming = self._body().get("captures", [])
@@ -297,6 +306,73 @@ class Handler(BaseHTTPRequestHandler):
             return self._upload_media()
 
         return self._json(404, {"error": "not found"})
+
+    # ---------------- search ----------------
+
+    def _search(self):
+        """POST /v1/search — web search or page fetch, optionally
+        summarised. {"query": str} searches; {"url": str} fetches a page
+        (the fetch wins when both are given). Optional "summarise": bool,
+        "model": str (per-call override, same validation as /v1/chat),
+        "max_results": int (1-10, default 5, search only).
+        Rate-limited (see search.py): over the limit -> 429 + retry_after.
+        A failed summary never fails the request — search.py falls back
+        to the first ~500 chars of the text."""
+        try:
+            import search as search_mod
+        except ImportError:
+            return self._json(503, {"error": "search module not deployed"})
+        try:
+            body = self._body()
+        except (ValueError, json.JSONDecodeError):
+            return self._json(400, {"error": "bad json"})
+        query = body.get("query")
+        query = query.strip() if isinstance(query, str) and query.strip() else None
+        url = body.get("url")
+        url = url.strip() if isinstance(url, str) and url.strip() else None
+        if not query and not url:
+            return self._json(400, {"error": "need 'query' or 'url'"})
+        model = body.get("model")
+        if not isinstance(model, str) or not model.strip():
+            model = None
+        want_summary = bool(body.get("summarise", False))
+        try:
+            max_results = int(body.get("max_results", 5))
+        except (TypeError, ValueError):
+            max_results = 5
+        max_results = max(1, min(10, max_results))
+
+        allowed, retry_after = search_mod.check_rate_limit()
+        if not allowed:
+            return self._json(429, {"error": "rate limited",
+                                    "retry_after": retry_after})
+
+        if url:  # fetch wins when both are given
+            try:
+                text = search_mod.fetch(url)
+            except ValueError as e:
+                return self._json(400, {"error": str(e)[:120]})
+            except Exception as e:
+                return self._json(502, {"error": f"fetch failed: {str(e)[:120]}"})
+            out = {"url": url, "text": text}
+            if want_summary:
+                out["summary"] = search_mod.summarise(text, model=model)
+            return self._json(200, out)
+
+        try:
+            results = search_mod.search(query, max_results=max_results)
+        except Exception as e:
+            return self._json(502, {"error": f"search failed: {str(e)[:120]}"})
+        out = {"results": results}
+        if want_summary:
+            if results:
+                joined = "\n\n".join(
+                    f"{r['title']}\n{r['url']}\n{r['snippet']}" for r in results)
+                out["summary"] = search_mod.summarise(joined, query=query,
+                                                      model=model)
+            else:
+                out["summary"] = f"No results found for '{query}'."
+        return self._json(200, out)
 
     def _upload_media(self):
         """Raw binary body; ?filename= gives the extension. Enforces the cap."""

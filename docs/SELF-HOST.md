@@ -65,7 +65,7 @@ On the VM (`gcloud compute ssh perihel-sync --zone=us-west1-b`):
 
 ```bash
 sudo mkdir -p /opt/perihel-sync && cd /opt/perihel-sync
-sudo cp ~/server.py ~/ai.py ~/tick.py ~/telegram_bot.py .   # from server/sync-server/ in this repo
+sudo cp ~/server.py ~/ai.py ~/tick.py ~/telegram_bot.py ~/search.py .   # from server/sync-server/ in this repo
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 \
   -nodes -subj "/CN=perihel-sync" -addext "subjectAltName=IP:YOUR_VM_IP"
 openssl rand -hex 32 | sudo tee token           # bearer token — the password
@@ -133,6 +133,45 @@ Environment=PERIHEL_BOT_MODEL=deepseek-ai/deepseek-v4.1-flash
 
 The bot never needs the NVIDIA key itself — inference stays in the server
 process, which reads `nim.key` as before.
+
+## 7. Web search + fetch (/v1/search)
+
+`server/sync-server/search.py` is a stdlib-only search/fetch worker the
+Telegram bot and the daily digest consume over HTTP. It adds one endpoint:
+
+- `POST /v1/search {"query": "..."}` → `{"results": [{title, url, snippet}]}`
+- `POST /v1/search {"url": "..."}` → `{"url": ..., "text": ...}`
+- Either form accepts `"summarise": true` (summarises the results / the
+  fetched page with the NIM model) and `"model": "..."` (per-call model
+  override, same rule as `/v1/chat`). Search also accepts
+  `"max_results": 1-10` (default 5). If both `query` and `url` are given,
+  the fetch wins.
+
+Search provider: **Bing's keyless RSS endpoint**
+(`bing.com/search?q=...&format=rss`) — no key, no signup, direct result
+links. DuckDuckGo's keyless HTML endpoint was tried first but is unusable
+from a cloud VM: it returns its bot-check ("anomaly") page instead of
+results (verified Nov 2026). Brave's search page 429s and Mojeek serves a
+captcha from the same VM, so Bing is the provider, with Bing's HTML
+results page as a fallback if the RSS endpoint ever stops returning
+items. Bing's RSS terms limit the results to personal, non-commercial
+use, which is what Perihel is.
+
+Rate limits (in-process, per server): at most one search/fetch per 5 s and
+at most 10 per rolling minute. Over the limit the endpoint answers HTTP
+429 with a `retry_after` (seconds) hint — it never silently drops a
+request. Summarising goes through the same NIM call as the AI processor,
+so it inherits that 5 s gap as well. A failed summary never fails the
+request: the first ~500 chars of the text are returned instead.
+
+Model: `PERIHEL_SEARCH_MODEL` env var overrides the summarisation model
+for every search call; unset means the server default (`PERIHEL_AI_MODEL`).
+Example for a better model, set it in the sync-server unit:
+
+```ini
+# in perihel-sync.service [Service]:
+Environment=PERIHEL_SEARCH_MODEL=deepseek-ai/deepseek-v4.1-flash
+```
 
 ## Kill switch (if anything ever looks wrong)
 
