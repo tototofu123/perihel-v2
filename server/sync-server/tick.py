@@ -88,14 +88,28 @@ def process_ai_queue(conn):
 
 
 def fire_reminders(conn):
+    """A reminder is marked fired iff at least one channel succeeded
+    (ntfy OR Telegram to at least one stored chat). If both fail — or
+    ntfy fails and the bot has never seen a chat — the reminder stays
+    pending and is retried on the next tick. The Telegram import is lazy
+    so a missing/broken telegram_bot.py can never break the ntfy path."""
     rows = conn.execute(
         "SELECT id, text, due_at FROM reminders WHERE status = 'pending' "
         "AND due_at <= ? ORDER BY due_at ASC LIMIT 10", (now_utc(),)).fetchall()
     for row in rows:
-        if push("Perihel reminder", row["text"], ["alarm_clock"]):
+        ntfy_ok = push("Perihel reminder", row["text"], ["alarm_clock"])
+        tg_ok = False
+        try:
+            from telegram_bot import get_chat_ids, send_telegram
+            for chat_id in get_chat_ids(conn):
+                if send_telegram(chat_id, f"⏰ {row['text']}"):
+                    tg_ok = True
+        except Exception as e:
+            print(f"telegram reminder failed: {e}", flush=True)
+        if ntfy_ok or tg_ok:
             conn.execute("UPDATE reminders SET status = 'fired', fired_at = ? WHERE id = ?",
                          (now_utc(), row["id"]))
-            print(f"reminder fired: {row['text']}", flush=True)
+            print(f"reminder fired: {row['text']} (ntfy={ntfy_ok} telegram={tg_ok})", flush=True)
     conn.commit()
 
 

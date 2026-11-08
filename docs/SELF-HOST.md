@@ -65,7 +65,7 @@ On the VM (`gcloud compute ssh perihel-sync --zone=us-west1-b`):
 
 ```bash
 sudo mkdir -p /opt/perihel-sync && cd /opt/perihel-sync
-sudo cp ~/server.py ~/ai.py ~/tick.py .            # from server/sync-server/ in this repo
+sudo cp ~/server.py ~/ai.py ~/tick.py ~/telegram_bot.py .   # from server/sync-server/ in this repo
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 \
   -nodes -subj "/CN=perihel-sync" -addext "subjectAltName=IP:YOUR_VM_IP"
 openssl rand -hex 32 | sudo tee token           # bearer token — the password
@@ -99,6 +99,40 @@ Also add a monitoring email channel to the budget for the alert email.
 - **Mobile**: `mobile/` — the app asks for server URL + token on first run.
 - **Phone pushes**: install the free ntfy app, subscribe to the topic from
   `/opt/perihel-sync/ntfy-topic`.
+
+## 6. Telegram bot (Perihel in the agent bus group)
+
+`server/sync-server/telegram_bot.py` long-polls Telegram and answers each
+message by posting it to the local server's `/v1/chat` (which saves the
+capture and runs the AI), then replies in the originating chat only.
+Reminders due also go to Telegram, alongside ntfy (`tick.py`).
+
+On the VM:
+
+```bash
+# 1. Create the bot with @BotFather (name + @username), copy its token.
+# 2. Save it the same way as the other secrets:
+cat > /opt/perihel-sync/telegram.key   # paste the token
+sudo chmod 600 /opt/perihel-sync/telegram.key
+# 3. Enable the service (unit in server/systemd/):
+sudo systemctl enable --now perihel-telegram
+```
+
+Group privacy: by default a bot only sees messages that @mention it. To let
+it answer plain messages in the agent bus group, disable privacy with
+BotFather `/setprivacy`, then remove the bot from the group and re-add it.
+
+Model: the bot passes `PERIHEL_BOT_MODEL` through `/v1/chat` as an
+optional per-call override; unset means the server default
+(`PERIHEL_AI_MODEL`). Example for a better model, set it in the unit:
+
+```ini
+# in perihel-telegram.service [Service]:
+Environment=PERIHEL_BOT_MODEL=deepseek-ai/deepseek-v4.1-flash
+```
+
+The bot never needs the NVIDIA key itself — inference stays in the server
+process, which reads `nim.key` as before.
 
 ## Kill switch (if anything ever looks wrong)
 
