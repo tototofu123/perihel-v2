@@ -63,13 +63,15 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _nim_call(messages, tools=None, timeout=90):
-    """Single NIM request honoring the rate limit. Returns the response JSON."""
+def _nim_call(messages, tools=None, timeout=90, model=None):
+    """Single NIM request honoring the rate limit. Returns the response JSON.
+    model overrides the global MODEL for this one call (the Telegram bot
+    passes PERIHEL_BOT_MODEL); None means the server default."""
     global _last_call
     wait = MIN_CALL_GAP_S - (time.time() - _last_call)
     if wait > 0:
         time.sleep(wait)
-    body = {"model": MODEL, "messages": messages, "max_tokens": 450,
+    body = {"model": model or MODEL, "messages": messages, "max_tokens": 450,
             "temperature": 0.3, "stream": False}
     if tools:
         body["tools"] = tools
@@ -90,14 +92,14 @@ JSON_INSTRUCTION = ("Reply with ONLY minified JSON, no prose: "
                     '"memories": [{"key": str, "value": str}] or []}}')
 
 
-def _json_turn(raw_content: str, system_msg: dict):
+def _json_turn(raw_content: str, system_msg: dict, model=None):
     """Strict-JSON completion (no tools). Returns (summary, category,
     reminders, memories) or (None,...) on failure."""
     try:
         fb = _nim_call([
             {"role": "system", "content": JSON_INSTRUCTION},
             {"role": "user", "content": raw_content},
-        ])
+        ], model=model)
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -109,7 +111,7 @@ def _json_turn(raw_content: str, system_msg: dict):
         return None, None, [], []
 
 
-def _process_json(messages, raw_content: str, user_content) -> tuple | None:
+def _process_json(messages, raw_content: str, user_content, model=None) -> tuple | None:
     """Vision path. NIM vision endpoints hang on system+image turns, so the
     JSON instruction rides in the text part of the single user message."""
     try:
@@ -119,7 +121,7 @@ def _process_json(messages, raw_content: str, user_content) -> tuple | None:
             {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
             image_part,
         ]}]
-        fb = _nim_call(message, timeout=240)  # vision turns queue long on the free tier
+        fb = _nim_call(message, timeout=240, model=model)  # vision turns queue long on the free tier
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -178,9 +180,12 @@ Current time: {now}
 Call your tools now (all applicable ones, in parallel). Do not reply with prose."""
 
 
-def process_capture(uuid: str, thumb_data_uri: str | None = None) -> dict:
+def process_capture(uuid: str, thumb_data_uri: str | None = None,
+                    model: str | None = None) -> dict:
     """Run AI over one capture. Writes results, returns {ai_state, reply}.
-    thumb_data_uri: optional base64 JPEG the vision model can look at."""
+    thumb_data_uri: optional base64 JPEG the vision model can look at.
+    model: optional per-call model override (the Telegram bot passes
+    PERIHEL_BOT_MODEL); None means the global MODEL."""
     conn = _db()
     row = conn.execute("SELECT content, content_type, ai_attempts FROM captures WHERE uuid = ?", (uuid,)).fetchone()
     if row is None:
@@ -205,13 +210,13 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None) -> dict:
     # images take the strict-JSON path directly instead of tool calling.
     vision = thumb_data_uri and isinstance(user_content, list)
     if vision:
-        parsed = _process_json(messages, row["content"], user_content)
+        parsed = _process_json(messages, row["content"], user_content, model=model)
         if parsed is None:
             return {"ai_state": "error", "reply": "saved (AI could not process the image — retry available)"}
         summary, category, reminders, memories = parsed
     else:
         try:
-            resp = _nim_call(messages, tools=TOOLS)
+            resp = _nim_call(messages, tools=TOOLS, model=model)
             msg = resp["choices"][0]["message"]
         except Exception as e:  # network / 5xx / rate-limit — retry-once later
             return {"ai_state": "queued-retry", "reply": f"saved (AI hiccup: {str(e)[:80]} — will retry)"}
@@ -229,7 +234,8 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None) -> dict:
                 memories.append((args.get("key", ""), args.get("value", "")))
 
         if not summary:  # model ignored tools — strict JSON fallback
-            summary, category, reminders, memories = _json_turn(row["content"], messages[0])
+            summary, category, reminders, memories = _json_turn(row["content"], messages[0],
+                                                                model=model)
             if summary is None:
                 return {"ai_state": "error", "reply": "saved (AI could not process this one — retry available)"}
 

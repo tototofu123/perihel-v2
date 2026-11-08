@@ -6,10 +6,14 @@ All inference is remote (NVIDIA NIM); this process only orchestrates.
   GET  /v1/health
   GET  /v1/captures?since=<rfc3339>     -> rows (tombstones included)
   POST /v1/captures {"captures": [...]} -> last-write-wins upsert
-  POST /v1/chat {"content": str, "ai": bool}
+  POST /v1/chat {"content": str, "ai": bool, "model": str?}
                                        -> ALWAYS saves the capture first,
                                           then runs AI (rate-limited) and
-                                          returns {capture, ai}
+                                          returns {capture, ai}. The optional
+                                          "model" overrides the AI model for
+                                          this one call only (the Telegram
+                                          bot passes PERIHEL_BOT_MODEL);
+                                          omitted means the server default.
   POST /v1/captures/delete {"uuid": ..} -> 30-day soft delete (tombstone)
   POST /v1/captures/retry  {"uuid": ..} -> requeue AI processing
   GET  /v1/reminders                    -> upcoming + recent reminder history
@@ -324,6 +328,9 @@ class Handler(BaseHTTPRequestHandler):
             media = body.get("media") or {}
         except (ValueError, json.JSONDecodeError):
             return self._json(400, {"error": "bad json"})
+        model = body.get("model")
+        if not isinstance(model, str) or not model.strip():
+            model = None  # absent / junk -> server default
         media_id = str(media.get("id") or "") or None
         thumb = str(media.get("thumb") or "") or None
         if thumb and not thumb.startswith("data:image/"):
@@ -354,7 +361,7 @@ class Handler(BaseHTTPRequestHandler):
 
         import ai as ai_mod
         try:
-            result = ai_mod.process_capture(cap_uuid, thumb_data_uri=thumb)
+            result = ai_mod.process_capture(cap_uuid, thumb_data_uri=thumb, model=model)
         except Exception as e:
             result = {"ai_state": "error", "reply": f"saved (AI error: {str(e)[:80]})"}
 

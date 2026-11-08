@@ -1,0 +1,15 @@
+[Unit]
+Description=Perihel Telegram bot
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/perihel-sync/telegram_bot.py
+Restart=always
+RestartSec=5
+MemoryMax=200M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/perihel-sync
+
+[Install]
+WantedBy=multi-user.target
