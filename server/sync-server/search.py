@@ -280,7 +280,7 @@ def summarise(text: str, query: str | None = None,
         user += f":\n\n{text[:SUMMARY_INPUT_CHARS]}"
         resp = _nim_call([{"role": "system", "content": SUMMARY_SYSTEM},
                           {"role": "user", "content": user}],
-                         timeout=90, model=use_model, role="worker")
+                         timeout=30, model=use_model, role="worker")
         out = resp["choices"][0]["message"]["content"].strip()
         return out or text[:SUMMARY_FALLBACK_CHARS]
     except Exception:
