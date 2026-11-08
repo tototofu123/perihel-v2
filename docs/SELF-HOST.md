@@ -303,6 +303,72 @@ call, or an empty section is reported as such in that section (e.g.
 "AI news unavailable today (search failed)"). A long digest is split
 into ≤4000-char Telegram messages so it never hits the 4096-char cap.
 
+## 10. Health watchdog (server + AI queue, every 10 min)
+
+`server/sync-server/watchdog.py` checks the server and the AI queue
+and alerts when something is wrong — one alert per incident, never a
+repeat every 10 minutes.
+
+What it checks, and what each alert means (and does not mean):
+
+- **Server down** — `GET /v1/health` on the local server fails
+  (connection refused, timeout, non-200, or `ok` is not true). The
+  alert says "the server is unreachable" — it does not claim a cause,
+  because the cause was not measured. A single failed check is enough
+  to alert: a down server is worth knowing immediately.
+- **AI queue stuck** — the oldest capture with `ai_state='queued'` has
+  waited more than **1 hour** (`STUCK_AGE_S = 3600` in `watchdog.py`).
+  It means the queue is backed up (or the tick is not running — see
+  issue #10), not that the AI itself is broken.
+- **AI errors spiked** — the error count grew since the last check,
+  or there are at least **5** captures in error state
+  (`ERROR_SPIKE_THRESHOLD = 5`). It means captures are failing AI
+  processing, not which one or why.
+
+Alert channels: ntfy (the same topic as `tick.py`) **and** Telegram
+(every chat the bot has seen). A down alert uses ntfy priority `high`;
+stuck/spike/recovery use `default`.
+
+Dedupe (one alert per incident): the last alerted state is stored in
+the `settings` table (`watchdog_state`, `watchdog_state_since`,
+`watchdog_error_count`). An alert fires only when the state changes
+(`ok → down/stuck/spike`, or one bad state to another — a down server
+that recovers into a still-stuck queue alerts again, because that is
+a new incident). A repeated check that finds the same bad state does
+NOT re-alert. When the state returns to `ok` after an alert, a
+recovery notice is sent ("was down for 1h 23m"). Priority is
+down > stuck > spike > ok, so a down server masks a stuck queue.
+
+Trigger: a systemd timer on the VM itself
+(`server/systemd/perihel-watchdog.timer`, `OnCalendar=*-*-* *:0/10:00`,
+`Persistent=true`):
+
+```bash
+sudo systemctl enable --now perihel-watchdog.timer
+```
+
+(`ops/deploy.sh` copies the watchdog files and units, but it does not
+enable the timer — enable it once, by hand, as above.) There is no
+`POST /v1/watchdog` endpoint on purpose: a watchdog check triggered
+through the very server being watched is useless when that server is
+down. To check by hand, run the script directly on the VM:
+
+```bash
+python3 /opt/perihel-sync/watchdog.py   # prints the state; exit 0 when the check ran
+sudo systemctl status perihel-watchdog  # last run + its output
+```
+
+Check the stored state by hand:
+
+```bash
+sudo sqlite3 /opt/perihel-sync/sync.db \
+  "SELECT key, value FROM settings WHERE key LIKE 'watchdog_%';"
+sudo sqlite3 /opt/perihel-sync/sync.db \
+  "SELECT COUNT(*) FROM captures WHERE ai_state = 'queued';"
+sudo sqlite3 /opt/perihel-sync/sync.db \
+  "SELECT MIN(created_at) FROM captures WHERE ai_state = 'queued';"
+```
+
 ## Kill switch (if anything ever looks wrong)
 
 ```bash
