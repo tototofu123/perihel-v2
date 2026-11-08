@@ -122,14 +122,17 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _nim_call(messages, tools=None, timeout=90, model=None, role=None):
+def _nim_call(messages, tools=None, timeout=30, model=None, role=None):
     """Single NIM request honoring the per-role rate limit. Returns the
     response JSON. model overrides the global MODEL for this one call
     (the Telegram bot passes PERIHEL_BOT_MODEL); None means the server
     default. role picks the key file and the rate limiter (see
     get_nim_key); None/unknown means the default role. Each call is
     logged with its role and the running per-role count, so usage is
-    visible in the server log."""
+    visible in the server log. Timeout is 30 s on purpose: a model that
+    has not answered in 30 s is not going to (it is queued or the key
+    lacks the entitlement), so fail fast and let the caller retry
+    later instead of leaving the user waiting for minutes."""
     role = validate_role(role)
     wait = MIN_CALL_GAP_S - (time.time() - _last_call.get(role, 0.0))
     if wait > 0:
@@ -188,7 +191,7 @@ def _process_json(messages, raw_content: str, user_content, model=None,
             {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
             image_part,
         ]}]
-        fb = _nim_call(message, timeout=240, model=model, role=role)  # vision turns queue long on the free tier
+        fb = _nim_call(message, timeout=60, model=model, role=role)  # vision turns queue on the free tier, but 60 s is the fail-fast cap
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -290,7 +293,11 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
             resp = _nim_call(messages, tools=TOOLS, model=model, role=role)
             msg = resp["choices"][0]["message"]
         except Exception as e:  # network / 5xx / rate-limit — retry-once later
-            return {"ai_state": "queued-retry", "reply": f"saved (AI hiccup: {str(e)[:80]} — will retry)"}
+            # Name the model so the reply says which AI was attempted and
+            # that it timed out, instead of a bare "hiccup".
+            return {"ai_state": "queued-retry",
+                    "reply": f"saved (AI hiccup: {model or MODEL} — "
+                             f"{str(e)[:60]} — will retry)"}
 
         summary = category = None
         reminders, memories = [], []

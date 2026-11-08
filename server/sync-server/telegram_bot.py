@@ -18,6 +18,7 @@ import html
 import json
 import os
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -38,7 +39,9 @@ _server_token_cache = None
 HELP_TEXT = (
     "Hi — I'm Perihel, your thought companion. Send me a thought and I'll "
     "save it and send back a short summary. If a thought names a time "
-    "('call mom Sunday'), I'll remind you here when it's due."
+    "('call mom Sunday'), I'll remind you here when it's due.\n\n"
+    "(This help message is built in — no AI was used to write it. "
+    "Summaries of your thoughts do use the AI model.)"
 )
 SERVER_UNREACHABLE = (
     "I couldn't reach the Perihel server right now, so your message wasn't "
@@ -180,6 +183,28 @@ def tg_api(method: str, payload: dict, timeout: int = 30) -> dict:
         return json.loads(resp.read().decode())
 
 
+def send_chat_action(chat_id: int, action: str = "typing") -> bool:
+    """Show a chat action (e.g. "typing...") so the user sees the bot
+    is working on their message. Best-effort: returns False (never
+    raises) when the bot is not configured or Telegram rejects it.
+    A typing indicator lasts about 5 s on the client, so long AI calls
+    re-send it — see _typing_loop."""
+    try:
+        out = tg_api("sendChatAction", {"chat_id": chat_id, "action": action},
+                     timeout=10)
+        return bool(out.get("ok"))
+    except Exception:
+        return False
+
+
+def _typing_loop(chat_id: int, stop: threading.Event):
+    """Re-send "typing" every 4 s until stop is set. Runs on a daemon
+    thread so a slow AI call keeps the "typing..." status alive instead
+    of going silent for a minute."""
+    while not stop.wait(4):
+        send_chat_action(chat_id, "typing")
+
+
 def send_telegram(chat_id: int, text: str, reply_to: int | None = None,
                   raw_html: bool = False) -> bool:
     """Send a message to one chat. Safe to import from tick.py: returns
@@ -202,7 +227,10 @@ def send_telegram(chat_id: int, text: str, reply_to: int | None = None,
 
 def post_chat(text: str, model: str | None = None) -> dict:
     """POST the text to the local sync server's /v1/chat. Raises on
-    connection/auth/HTTP failure — the caller decides what to tell the user."""
+    connection/auth/HTTP failure — the caller decides what to tell the user.
+    Timeout 90 s: the AI call inside fails fast (30 s per attempt, see
+    ai.py), so a /v1/chat round-trip that is still running after 90 s
+    means the server itself is stuck, not the model thinking."""
     body = {"content": text, "ai": True, "role": "bot"}
     if model:
         body["model"] = model
@@ -210,22 +238,35 @@ def post_chat(text: str, model: str | None = None) -> dict:
         CHAT_URL, data=json.dumps(body).encode(), method="POST",
         headers={"Authorization": f"Bearer {_server_token()}",
                  "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=90) as resp:
         return json.loads(resp.read().decode())
 
 
 def handle_message(msg: dict, bot_id: int | None) -> bool:
-    """Answer one parsed message. Returns True if a reply was sent."""
+    """Answer one parsed message. Returns True if a reply was sent.
+    While the AI is working, the bot shows "typing..." in the chat (a
+    refresher thread re-sends it every 4 s, since one indicator only
+    lasts ~5 s) so the user sees it is thinking instead of silence.
+    The reply itself says how it was produced: an AI summary is the
+    AI's words, /start is the built-in help, and a failed AI call says
+    so and that the thought was saved for retry."""
     with db() as conn:
         record_chat(conn, msg["chat_id"], msg["chat_type"], msg["chat_title"])
     if msg["is_start"]:
         return send_telegram(msg["chat_id"], HELP_TEXT, reply_to=msg["message_id"])
+    stop_typing = threading.Event()
+    typing_thread = threading.Thread(
+        target=_typing_loop, args=(msg["chat_id"], stop_typing), daemon=True)
+    send_chat_action(msg["chat_id"], "typing")
+    typing_thread.start()
     try:
         result = post_chat(msg["text"], model=BOT_MODEL)
     except Exception as e:
         print(f"/v1/chat failed: {e}", flush=True)
         return send_telegram(msg["chat_id"], SERVER_UNREACHABLE,
                              reply_to=msg["message_id"])
+    finally:
+        stop_typing.set()
     ai = result.get("ai") or {}
     reply = ai.get("reply") or "saved."
     return send_telegram(msg["chat_id"], reply, reply_to=msg["message_id"])
