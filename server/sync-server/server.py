@@ -6,7 +6,7 @@ All inference is remote (NVIDIA NIM); this process only orchestrates.
   GET  /v1/health
   GET  /v1/captures?since=<rfc3339>     -> rows (tombstones included)
   POST /v1/captures {"captures": [...]} -> last-write-wins upsert
-  POST /v1/chat {"content": str, "ai": bool, "model": str?}
+  POST /v1/chat {"content": str, "ai": bool, "model": str?, "role": str?}
                                        -> ALWAYS saves the capture first,
                                           then runs AI (rate-limited) and
                                           returns {capture, ai}. The optional
@@ -14,6 +14,10 @@ All inference is remote (NVIDIA NIM); this process only orchestrates.
                                           this one call only (the Telegram
                                           bot passes PERIHEL_BOT_MODEL);
                                           omitted means the server default.
+                                          The optional "role" picks the
+                                          NVIDIA key and rate limiter
+                                          ("bot" | "worker" | "default");
+                                          omitted/unknown means "default".
   POST /v1/search {"query": str} | {"url": str}  -> web search or page
                                           fetch, optional "summarise": bool,
                                           "model": str (per-call override,
@@ -407,6 +411,9 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model")
         if not isinstance(model, str) or not model.strip():
             model = None  # absent / junk -> server default
+        role = body.get("role")
+        if not isinstance(role, str) or not role.strip():
+            role = None  # absent / junk -> default role (ai.py validates)
         media_id = str(media.get("id") or "") or None
         thumb = str(media.get("thumb") or "") or None
         if thumb and not thumb.startswith("data:image/"):
@@ -437,7 +444,8 @@ class Handler(BaseHTTPRequestHandler):
 
         import ai as ai_mod
         try:
-            result = ai_mod.process_capture(cap_uuid, thumb_data_uri=thumb, model=model)
+            result = ai_mod.process_capture(cap_uuid, thumb_data_uri=thumb,
+                                            model=model, role=role)
         except Exception as e:
             result = {"ai_state": "error", "reply": f"saved (AI error: {str(e)[:80]})"}
 

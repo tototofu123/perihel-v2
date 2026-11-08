@@ -16,13 +16,72 @@ import urllib.request
 from datetime import datetime, timezone
 
 DATA_DIR = os.environ.get("PERIHEL_SYNC_DIR", "/opt/perihel-sync")
-NIM_KEY = open(os.path.join(DATA_DIR, "nim.key")).read().strip()
 NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = os.environ.get("PERIHEL_AI_MODEL", "meta/llama-3.2-11b-vision-instruct")
 
-MIN_CALL_GAP_S = 5          # never hit the API more often than this
+# Roles — each may have its own NVIDIA key (see get_nim_key). The role
+# picks the KEY and the rate limiter; it does NOT pick the model (the
+# model is threaded separately, per call).
+ROLES = ("bot", "worker", "default")
+DEFAULT_ROLE = "default"
+
+MIN_CALL_GAP_S = 5          # never hit the API more often than this, per role
 RETRY_AFTER_S = 120         # retry-once window
-_last_call = 0.0
+_last_call: dict[str, float] = {}   # role -> timestamp of its last NIM call
+_call_counts: dict[str, int] = {}   # role -> NIM calls made this process
+_key_cache: dict[str, str] = {}     # key filename -> key contents (hits only;
+                                    # a miss is never cached, so creating a
+                                    # key file while the server runs works)
+
+
+def validate_role(role) -> str:
+    """Normalise a role to the allowlist; unknown / blank / non-string
+    means the default role (desktop, mobile, tick queue)."""
+    if isinstance(role, str) and role.strip().lower() in ROLES:
+        return role.strip().lower()
+    return DEFAULT_ROLE
+
+
+def _read_key_file(filename: str) -> str | None:
+    """One key file's contents, or None when missing/blank. Successful
+    reads are cached per filename; misses are not cached."""
+    if filename in _key_cache:
+        return _key_cache[filename]
+    try:
+        with open(os.path.join(DATA_DIR, filename)) as f:
+            key = f.read().strip()
+    except OSError:
+        return None
+    if not key:
+        return None
+    _key_cache[filename] = key
+    return key
+
+
+def get_nim_key(role: str = DEFAULT_ROLE) -> str:
+    """The NVIDIA key for a role. Precedence: nim.<role>.key, then
+    nim.key. A deployment with only nim.key keeps working unchanged.
+    Raises RuntimeError naming the files it looked for when neither
+    exists — keys are read lazily (never at import), so a missing key
+    can never break startup; it fails on the first NIM call instead."""
+    role = validate_role(role)
+    if role != DEFAULT_ROLE:
+        key = _read_key_file(f"nim.{role}.key")
+        if key:
+            return key
+    key = _read_key_file("nim.key")
+    if key:
+        return key
+    tried = [f"nim.{role}.key", "nim.key"] if role != DEFAULT_ROLE else ["nim.key"]
+    raise RuntimeError(
+        f"no NVIDIA key found (looked for {', '.join(tried)} in {DATA_DIR}); "
+        "mint one at build.nvidia.com")
+
+
+def nim_usage() -> dict:
+    """Per-role NIM call counts this process (for /v1/health or the
+    watchdog to read). Returns a copy."""
+    return dict(_call_counts)
 
 CATEGORIES = ["idea", "todo", "link", "note", "question", "person", "event"]
 
@@ -63,12 +122,16 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _nim_call(messages, tools=None, timeout=90, model=None):
-    """Single NIM request honoring the rate limit. Returns the response JSON.
-    model overrides the global MODEL for this one call (the Telegram bot
-    passes PERIHEL_BOT_MODEL); None means the server default."""
-    global _last_call
-    wait = MIN_CALL_GAP_S - (time.time() - _last_call)
+def _nim_call(messages, tools=None, timeout=90, model=None, role=None):
+    """Single NIM request honoring the per-role rate limit. Returns the
+    response JSON. model overrides the global MODEL for this one call
+    (the Telegram bot passes PERIHEL_BOT_MODEL); None means the server
+    default. role picks the key file and the rate limiter (see
+    get_nim_key); None/unknown means the default role. Each call is
+    logged with its role and the running per-role count, so usage is
+    visible in the server log."""
+    role = validate_role(role)
+    wait = MIN_CALL_GAP_S - (time.time() - _last_call.get(role, 0.0))
     if wait > 0:
         time.sleep(wait)
     body = {"model": model or MODEL, "messages": messages, "max_tokens": 450,
@@ -78,11 +141,14 @@ def _nim_call(messages, tools=None, timeout=90, model=None):
         body["tool_choice"] = "auto"
     req = urllib.request.Request(
         NIM_URL, data=json.dumps(body).encode(), method="POST",
-        headers={"Authorization": f"Bearer {NIM_KEY}",
+        headers={"Authorization": f"Bearer {get_nim_key(role)}",
                  "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read().decode())
-    _last_call = time.time()
+    _last_call[role] = time.time()
+    _call_counts[role] = _call_counts.get(role, 0) + 1
+    print(f"NIM call: role={role} model={body['model']} "
+          f"calls_for_role={_call_counts[role]}", flush=True)
     return out
 
 
@@ -92,14 +158,14 @@ JSON_INSTRUCTION = ("Reply with ONLY minified JSON, no prose: "
                     '"memories": [{"key": str, "value": str}] or []}}')
 
 
-def _json_turn(raw_content: str, system_msg: dict, model=None):
+def _json_turn(raw_content: str, system_msg: dict, model=None, role=None):
     """Strict-JSON completion (no tools). Returns (summary, category,
     reminders, memories) or (None,...) on failure."""
     try:
         fb = _nim_call([
             {"role": "system", "content": JSON_INSTRUCTION},
             {"role": "user", "content": raw_content},
-        ], model=model)
+        ], model=model, role=role)
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -111,7 +177,8 @@ def _json_turn(raw_content: str, system_msg: dict, model=None):
         return None, None, [], []
 
 
-def _process_json(messages, raw_content: str, user_content, model=None) -> tuple | None:
+def _process_json(messages, raw_content: str, user_content, model=None,
+                  role=None) -> tuple | None:
     """Vision path. NIM vision endpoints hang on system+image turns, so the
     JSON instruction rides in the text part of the single user message."""
     try:
@@ -121,7 +188,7 @@ def _process_json(messages, raw_content: str, user_content, model=None) -> tuple
             {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
             image_part,
         ]}]
-        fb = _nim_call(message, timeout=240, model=model)  # vision turns queue long on the free tier
+        fb = _nim_call(message, timeout=240, model=model, role=role)  # vision turns queue long on the free tier
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -181,11 +248,14 @@ Call your tools now (all applicable ones, in parallel). Do not reply with prose.
 
 
 def process_capture(uuid: str, thumb_data_uri: str | None = None,
-                    model: str | None = None) -> dict:
+                    model: str | None = None, role: str | None = None) -> dict:
     """Run AI over one capture. Writes results, returns {ai_state, reply}.
     thumb_data_uri: optional base64 JPEG the vision model can look at.
     model: optional per-call model override (the Telegram bot passes
-    PERIHEL_BOT_MODEL); None means the global MODEL."""
+    PERIHEL_BOT_MODEL); None means the global MODEL.
+    role: optional role for the key file and rate limiter ("bot",
+    "worker", "default"); None/unknown means the default role. The
+    role does not pick the model — that is the separate `model` arg."""
     conn = _db()
     row = conn.execute("SELECT content, content_type, ai_attempts FROM captures WHERE uuid = ?", (uuid,)).fetchone()
     if row is None:
@@ -210,13 +280,14 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
     # images take the strict-JSON path directly instead of tool calling.
     vision = thumb_data_uri and isinstance(user_content, list)
     if vision:
-        parsed = _process_json(messages, row["content"], user_content, model=model)
+        parsed = _process_json(messages, row["content"], user_content, model=model,
+                               role=role)
         if parsed is None:
             return {"ai_state": "error", "reply": "saved (AI could not process the image — retry available)"}
         summary, category, reminders, memories = parsed
     else:
         try:
-            resp = _nim_call(messages, tools=TOOLS, model=model)
+            resp = _nim_call(messages, tools=TOOLS, model=model, role=role)
             msg = resp["choices"][0]["message"]
         except Exception as e:  # network / 5xx / rate-limit — retry-once later
             return {"ai_state": "queued-retry", "reply": f"saved (AI hiccup: {str(e)[:80]} — will retry)"}
@@ -235,7 +306,7 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
 
         if not summary:  # model ignored tools — strict JSON fallback
             summary, category, reminders, memories = _json_turn(row["content"], messages[0],
-                                                                model=model)
+                                                                model=model, role=role)
             if summary is None:
                 return {"ai_state": "error", "reply": "saved (AI could not process this one — retry available)"}
 

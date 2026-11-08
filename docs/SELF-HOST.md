@@ -131,8 +131,11 @@ optional per-call override; unset means the server default
 Environment=PERIHEL_BOT_MODEL=deepseek-ai/deepseek-v4.1-flash
 ```
 
+Keys: the bot's calls use `nim.bot.key` — see §8.
+
 The bot never needs the NVIDIA key itself — inference stays in the server
-process, which reads `nim.key` as before.
+process, which reads `nim.bot.key` (falling back to `nim.key`) for the
+bot's calls — see §8.
 
 ## 7. Web search + fetch (/v1/search)
 
@@ -172,6 +175,45 @@ Example for a better model, set it in the sync-server unit:
 # in perihel-sync.service [Service]:
 Environment=PERIHEL_SEARCH_MODEL=deepseek-ai/deepseek-v4.1-flash
 ```
+
+Keys: the search worker's summaries use `nim.worker.key` — see §8.
+
+## 8. Per-role NVIDIA keys
+
+Each caller role may have its own NVIDIA key, so the bot and the search
+worker no longer share one key — or one rate-limit window:
+
+| Role | Who | Key file |
+|---|---|---|
+| `bot` | Telegram bot (`/v1/chat` with `"role": "bot"`) | `nim.bot.key` |
+| `worker` | Search worker summaries (`/v1/search` with `summarise`) | `nim.worker.key` |
+| `default` | Main capture processor — desktop, mobile, tick queue | `nim.key` |
+
+Precedence per role: `nim.<role>.key` if it exists, else `nim.key`.
+A deployment with only `nim.key` keeps working unchanged — every role
+falls back to it. Save role keys the same way as `nim.key` (chmod 600).
+
+Rate limiting is per role: each role gets its own 5 s minimum gap, so
+the bot and the search worker no longer block each other. The retry-once
+behaviour is unchanged.
+
+Usage is visible in the server log — one line per NIM call:
+
+```
+NIM call: role=bot model=deepseek-ai/deepseek-v4.1-flash calls_for_role=3
+```
+
+To add a role key on the VM:
+
+```bash
+cat > /opt/perihel-sync/nim.bot.key   # paste the bot's key
+sudo chmod 600 /opt/perihel-sync/nim.bot.key
+sudo systemctl restart perihel-sync   # (and perihel-telegram if running)
+```
+
+The server reads keys lazily, so a missing key file never breaks
+startup — it fails on the first call that needs it, with an error
+naming the files it looked for.
 
 ## Kill switch (if anything ever looks wrong)
 
