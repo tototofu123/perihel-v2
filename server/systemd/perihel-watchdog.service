@@ -1,0 +1,11 @@
+[Unit]
+Description=Perihel health watchdog (server + AI queue)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/perihel-sync/watchdog.py
+MemoryMax=200M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/perihel-sync
