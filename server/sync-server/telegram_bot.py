@@ -199,7 +199,7 @@ def send_telegram(chat_id: int, text: str, reply_to: int | None = None) -> bool:
 def post_chat(text: str, model: str | None = None) -> dict:
     """POST the text to the local sync server's /v1/chat. Raises on
     connection/auth/HTTP failure — the caller decides what to tell the user."""
-    body = {"content": text, "ai": True}
+    body = {"content": text, "ai": True, "role": "bot"}
     if model:
         body["model"] = model
     req = urllib.request.Request(
