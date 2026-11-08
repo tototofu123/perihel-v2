@@ -88,7 +88,7 @@ On the VM (`gcloud compute ssh perihel-sync --zone=us-west1-b`):
 
 ```bash
 sudo mkdir -p /opt/perihel-sync && cd /opt/perihel-sync
-sudo cp ~/server.py ~/ai.py ~/tick.py ~/telegram_bot.py ~/search.py .   # from server/sync-server/ in this repo
+sudo cp ~/server.py ~/ai.py ~/tick.py ~/telegram_bot.py ~/search.py ~/digest.py .   # from server/sync-server/ in this repo
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 \
   -nodes -subj "/CN=perihel-sync" -addext "subjectAltName=IP:YOUR_VM_IP"
 openssl rand -hex 32 | sudo tee token           # bearer token — the password
@@ -237,6 +237,71 @@ sudo systemctl restart perihel-sync   # (and perihel-telegram if running)
 The server reads keys lazily, so a missing key file never breaks
 startup — it fails on the first call that needs it, with an error
 naming the files it looked for.
+
+## 9. Daily digest (morning, via Telegram)
+
+`server/sync-server/digest.py` builds the morning digest — three
+sections — and sends it to every Telegram chat the bot has seen:
+
+1. **AI news** — the search worker (§7) for "artificial intelligence
+   news", top 5 results, summarised by the worker role's model.
+2. **Repo PRs/issues summary** — open PRs and open issues (most
+   recently updated first, max 5 each) for the configured repos.
+3. **Plans** — `plans.md` in `/opt/perihel-sync` (one plan per line;
+   blank lines and `#` comments skipped, max 10 lines) if it exists;
+   otherwise the top open issues across the configured repos, with a
+   note that `plans.md` is missing.
+
+Defaults (changeable): the repos are `tototofu123/agent-bus`,
+`tototofu123/perihel-v2`, and `HKUST-Climbing-Society/hkust-climbing-app`;
+the plans source is `plans.md`; the time is **08:00 VM-local time**.
+Change the repos with the `PERIHEL_DIGEST_REPOS` env var
+(comma-separated `owner/repo`, set it in the digest unit):
+
+```ini
+# in perihel-digest.service [Service]:
+Environment=PERIHEL_DIGEST_REPOS=tototofu123/agent-bus,tototofu123/perihel-v2
+```
+
+GitHub access: no token is needed for public repos — unauthenticated
+requests allow 60/hour, and the digest makes 2 per repo (6 for the
+default list). For private repos, add a read-only personal access
+token (classic PAT with `repo` scope, or a fine-grained token with
+read access to the repos) as `/opt/perihel-sync/github.key`
+(chmod 600, same pattern as the other secrets). Without it, a private
+repo shows as "unreachable" in the digest instead of failing it. The
+token is never printed or logged.
+
+Trigger: the digest runs on the VM itself, on a systemd timer
+(`server/systemd/perihel-digest.timer`, `OnCalendar=*-*-* 08:00:00`,
+`Persistent=true` so a missed run fires on boot). The VM clock should
+be Asia/Hong_Kong so 08:00 means 08:00 HKT:
+
+```bash
+sudo timedatectl set-timezone Asia/Hong_Kong
+sudo systemctl enable --now perihel-digest.timer
+```
+
+(`ops/deploy.sh` copies the digest files and units, but it does not
+enable the timer — enable it once, by hand, as above. Change the time
+by editing `OnCalendar` in the timer unit, then
+`sudo systemctl daemon-reload`.)
+
+Why a VM timer and not the agent-bus scheduler (agent-bus #15): the
+bus is localhost-only on the Windows machine and the VM cannot see it
+— there is no Telegram bridge code in agent-bus — so a bus `task.offer`
+can never reach the VM. The bus scheduler stays the mechanism for
+scheduled jobs generally, but it cannot trigger this one.
+
+Manual trigger: `POST /v1/digest {}` (bearer-authenticated, like the
+other endpoints) builds and sends the digest now, returning
+`{"sent", "sections", "chats"}`. The timer calls `digest.py`
+directly, not the endpoint.
+
+The digest never fabricates content: a failed search, a failed GitHub
+call, or an empty section is reported as such in that section (e.g.
+"AI news unavailable today (search failed)"). A long digest is split
+into ≤4000-char Telegram messages so it never hits the 4096-char cap.
 
 ## Kill switch (if anything ever looks wrong)
 

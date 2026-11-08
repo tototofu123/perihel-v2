@@ -180,12 +180,16 @@ def tg_api(method: str, payload: dict, timeout: int = 30) -> dict:
         return json.loads(resp.read().decode())
 
 
-def send_telegram(chat_id: int, text: str, reply_to: int | None = None) -> bool:
+def send_telegram(chat_id: int, text: str, reply_to: int | None = None,
+                  raw_html: bool = False) -> bool:
     """Send a message to one chat. Safe to import from tick.py: returns
     False (never raises) when the bot is not configured or Telegram
-    rejects the call."""
+    rejects the call. raw_html=True sends pre-formatted Telegram HTML
+    as-is (the caller must escape its own data first — the digest does);
+    the default escapes the text (plain messages)."""
     try:
-        payload = {"chat_id": chat_id, "text": format_reply(text),
+        payload = {"chat_id": chat_id,
+                   "text": text if raw_html else format_reply(text),
                    "parse_mode": "HTML"}
         if reply_to is not None:
             payload["reply_to_message_id"] = reply_to

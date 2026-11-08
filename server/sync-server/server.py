@@ -24,6 +24,19 @@ All inference is remote (NVIDIA NIM); this process only orchestrates.
                                           same rule as /v1/chat),
                                           "max_results": 1-10 (default 5).
                                           Rate-limited: 429 + retry_after.
+  POST /v1/digest {}                     -> build the morning digest
+                                          (AI news + repo PRs/issues +
+                                          plans) and send it to every
+                                          Telegram chat the bot has seen.
+                                          Returns {"sent", "sections",
+                                          "chats"}. The systemd timer
+                                          calls digest.py directly, not
+                                          this endpoint — this is the
+                                          manual trigger. The build can
+                                          take a while (search + GitHub
+                                          + NIM + Telegram); the server
+                                          is threaded, so other requests
+                                          are unaffected.
   POST /v1/captures/delete {"uuid": ..} -> 30-day soft delete (tombstone)
   POST /v1/captures/retry  {"uuid": ..} -> requeue AI processing
   GET  /v1/reminders                    -> upcoming + recent reminder history
@@ -279,6 +292,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/v1/search":
             return self._search()
 
+        if url.path == "/v1/digest":
+            return self._digest()
+
         if url.path == "/v1/captures":
             try:
                 incoming = self._body().get("captures", [])
@@ -310,6 +326,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._upload_media()
 
         return self._json(404, {"error": "not found"})
+
+    # ---------------- digest ----------------
+
+    def _digest(self):
+        """POST /v1/digest — build the morning digest and send it to
+        every Telegram chat the bot has seen. Returns {"sent",
+        "sections", "chats"}. The systemd timer calls digest.py
+        directly, not this endpoint — this is the manual trigger."""
+        try:
+            import digest as digest_mod
+        except ImportError:
+            return self._json(503, {"error": "digest module not deployed"})
+        try:
+            result = digest_mod.send_digest()
+        except Exception as e:
+            return self._json(502, {"error": f"digest failed: {str(e)[:120]}"})
+        return self._json(200, {"sent": result["sent"],
+                                "sections": result["data"].get("sections", {}),
+                                "chats": result["chats"]})
 
     # ---------------- search ----------------
 

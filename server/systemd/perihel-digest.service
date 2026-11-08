@@ -1,0 +1,11 @@
+[Unit]
+Description=Perihel daily digest (AI news, repo PRs/issues, plans)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/perihel-sync/digest.py
+MemoryMax=200M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/perihel-sync
