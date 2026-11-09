@@ -518,9 +518,17 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
                                      "content": result or ""})
             if summary or not read_used:
                 break
-            # read tools ran and no summary yet: one more turn so the
-            # model can answer from the results. If that turn fails, the
-            # loop's except above breaks to the JSON fallback.
+            # Read tools ran and no summary yet: one more turn so the
+            # model can answer from the results. Nudge it to finish —
+            # without this the model re-searches instead of answering
+            # (seen live on Ultra: turn 2 called search_web again
+            # because the first results were poor, and the loop ran
+            # out of turns). If that turn fails, the loop's except
+            # above breaks to the JSON fallback.
+            messages.append({"role": "user", "content": "You have the results above. "
+                             "Now call capture_update with your answer "
+                             "(summary + category). Do not call search_web, "
+                             "fetch_url, reminder_list or memory_search again."})
 
         if not summary:  # model ignored tools — strict JSON fallback
             summary, category, reminders, memories = _json_turn(row["content"], messages[0],
