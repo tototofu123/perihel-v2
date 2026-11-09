@@ -29,6 +29,9 @@ DB_PATH = os.path.join(DATA_DIR, "sync.db")
 TELEGRAM_KEY_PATH = os.path.join(DATA_DIR, "telegram.key")
 TOKEN_PATH = os.path.join(DATA_DIR, "token")
 TG_API = "https://api.telegram.org"
+# The upstream the bot sends thoughts to, named in the status line so
+# the user can see where their message actually went.
+NIM_HOST = "integrate.api.nvidia.com"
 CHAT_URL = os.environ.get("PERIHEL_SYNC_URL", "http://127.0.0.1:8443/v1/chat")
 BOT_MODEL = os.environ.get("PERIHEL_BOT_MODEL") or None
 
@@ -225,6 +228,52 @@ def send_telegram(chat_id: int, text: str, reply_to: int | None = None,
         return False
 
 
+def _tg_ok(method: str, payload: dict, timeout: int = 15) -> dict:
+    """One Telegram call that never raises: {} on any failure."""
+    try:
+        return tg_api(method, payload, timeout=timeout)
+    except Exception:
+        return {}
+
+
+def send_status(chat_id: int, text: str) -> int | None:
+    """Send a live status line; returns its message_id, or None. The
+    caller edits it as the work progresses and deletes it when done,
+    so the chat shows one moving line instead of silence."""
+    out = _tg_ok("sendMessage", {"chat_id": chat_id,
+                                 "text": format_reply(text),
+                                 "parse_mode": "HTML"})
+    return (out.get("result") or {}).get("message_id")
+
+
+def edit_status(chat_id: int, message_id: int, text: str) -> bool:
+    return bool(_tg_ok("editMessageText",
+                       {"chat_id": chat_id, "message_id": message_id,
+                        "text": format_reply(text), "parse_mode": "HTML"})
+                .get("ok"))
+
+
+def delete_message(chat_id: int, message_id: int) -> bool:
+    return bool(_tg_ok("deleteMessage",
+                       {"chat_id": chat_id, "message_id": message_id})
+                .get("ok"))
+
+
+def _status_loop(chat_id: int, message_id: int, started: float,
+                 model: str, stop: threading.Event):
+    """While the AI is working, refresh the status line every 10 s
+    with the elapsed wait, so the user sees the bot is still on it
+    and how long the upstream has been thinking. Runs on a daemon
+    thread; stops when `stop` is set."""
+    while not stop.wait(10):
+        if stop.is_set():
+            return
+        elapsed = int(time.time() - started)
+        edit_status(chat_id, message_id,
+                    f"⏳ Still waiting on NVIDIA ({model})… {elapsed}s "
+                    f"— sent to {NIM_HOST}")
+
+
 def post_chat(text: str, model: str | None = None) -> dict:
     """POST the text to the local sync server's /v1/chat. Raises on
     connection/auth/HTTP failure — the caller decides what to tell the user.
@@ -244,31 +293,55 @@ def post_chat(text: str, model: str | None = None) -> dict:
 
 def handle_message(msg: dict, bot_id: int | None) -> bool:
     """Answer one parsed message. Returns True if a reply was sent.
-    While the AI is working, the bot shows "typing..." in the chat (a
-    refresher thread re-sends it every 4 s, since one indicator only
-    lasts ~5 s) so the user sees it is thinking instead of silence.
-    The reply itself says how it was produced: an AI summary is the
+    While the AI is working the chat shows one live status line —
+    "sent to integrate.api.nvidia.com (model)…", refreshed every 10 s
+    with the elapsed wait — plus the "typing..." indicator (a refresher
+    thread re-sends it every 4 s, since one indicator only lasts ~5 s).
+    When the answer is ready the status line is deleted and the reply
+    is sent; on failure the status line itself becomes the error
+    message. The reply says how it was produced: an AI summary is the
     AI's words, /start is the built-in help, and a failed AI call says
     so and that the thought was saved for retry."""
     with db() as conn:
         record_chat(conn, msg["chat_id"], msg["chat_type"], msg["chat_title"])
     if msg["is_start"]:
         return send_telegram(msg["chat_id"], HELP_TEXT, reply_to=msg["message_id"])
-    stop_typing = threading.Event()
+    model_label = BOT_MODEL or "server default"
+    started = time.time()
+    status_id = send_status(
+        msg["chat_id"],
+        f"⏳ Got it — sent to {NIM_HOST} ({model_label})…")
+    stop_indicators = threading.Event()
     typing_thread = threading.Thread(
-        target=_typing_loop, args=(msg["chat_id"], stop_typing), daemon=True)
+        target=_typing_loop, args=(msg["chat_id"], stop_indicators), daemon=True)
+    status_thread = None
+    if status_id is not None:
+        status_thread = threading.Thread(
+            target=_status_loop,
+            args=(msg["chat_id"], status_id, started, model_label,
+                  stop_indicators),
+            daemon=True)
     send_chat_action(msg["chat_id"], "typing")
     typing_thread.start()
+    if status_thread is not None:
+        status_thread.start()
     try:
         result = post_chat(msg["text"], model=BOT_MODEL)
     except Exception as e:
         print(f"/v1/chat failed: {e}", flush=True)
+        if status_id is not None:
+            edit_status(msg["chat_id"], status_id, "❌ " + SERVER_UNREACHABLE)
+            return True  # the status line IS the reply now
         return send_telegram(msg["chat_id"], SERVER_UNREACHABLE,
                              reply_to=msg["message_id"])
     finally:
-        stop_typing.set()
+        stop_indicators.set()
     ai = result.get("ai") or {}
     reply = ai.get("reply") or "saved."
+    if status_id is not None:
+        delete_message(msg["chat_id"], status_id)
+    print(f"bot reply: {int(time.time() - started)}s model={model_label}",
+          flush=True)
     return send_telegram(msg["chat_id"], reply, reply_to=msg["message_id"])
 
 
