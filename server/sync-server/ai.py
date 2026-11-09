@@ -262,10 +262,21 @@ FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "minimaxai/minimax-m3.1-flash").split(",") if m.strip()]
 
 
+# Dead-model cache: a model that just timed out / 5xx'd is skipped for
+# 10 minutes. Without it, one dead configured model costs 30 s on EVERY
+# call in a capture — the live DeepSeek test took 71 s (tool turn timed
+# out, then the JSON fallback turn timed out again) against the bot's
+# 90 s reply window. A model that recovers is tried again after the TTL.
+_DEAD_TTL_S = 600
+_dead_until: dict[str, float] = {}
+
+
 def _fallback_chain(model):
     chain = [model or MODEL]
     chain += [m for m in FALLBACK_MODELS if m not in chain]
-    return chain
+    now = time.time()
+    live = [m for m in chain if _dead_until.get(m, 0) <= now]
+    return live or chain[:1]
 
 
 def _is_retryable(exc) -> bool:
@@ -297,6 +308,7 @@ def nim_call_fallback(messages, tools=None, timeout=30, model=None,
             last_exc = e
             if not _is_retryable(e):
                 raise
+            _dead_until[m] = time.time() + _DEAD_TTL_S
             print(f"NIM fallback: {m} failed ({str(e)[:60]}), "
                   f"trying next model", flush=True)
     raise last_exc
