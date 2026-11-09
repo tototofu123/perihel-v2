@@ -491,6 +491,13 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
                         "reply": f"saved (AI hiccup: {model or MODEL} — "
                                  f"{str(e)[:60]} — will retry)"}
             calls = msg.get("tool_calls") or []
+            # Log each turn's tool choice: free models are flaky tool
+            # callers, and this is the only way to tell a missed tool
+            # from a failed tool from the server journal.
+            print(f"AI turn {_turn}: tools="
+                  f"{[c['function']['name'] for c in calls]} "
+                  f"content={repr((msg.get('content') or '')[:60])}",
+                  flush=True)
             if not calls:
                 break
             messages.append({"role": "assistant",
