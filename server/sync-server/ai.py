@@ -249,6 +249,59 @@ def _nim_call(messages, tools=None, timeout=30, model=None, role=None):
     return out
 
 
+# Fallback chain (issue #23): models proven to answer on the free tier,
+# fastest and best tool-callers first (measured 2026-11-09: Laguna 0.2 s,
+# Bolt 0.3 s, MiniMax 0.6-2.8 s; DeepSeek, Mistral, GLM, Gemma, GPT-OSS
+# and Llama 90B all timed out at 60 s). The configured model is tried
+# first; fallbacks run only on timeout / connection failure / 5xx —
+# never on 400 (a bad request is a bug in our payload, not the model)
+# or 429 (the rate limit is per account, shared by every model).
+FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    "PERIHEL_MODEL_FALLBACKS",
+    "poolside/laguna-xs-2.1,nvidia/nemotron-3.5-bolt-e4b,"
+    "minimaxai/minimax-m3.1-flash").split(",") if m.strip()]
+
+
+def _fallback_chain(model):
+    chain = [model or MODEL]
+    chain += [m for m in FALLBACK_MODELS if m not in chain]
+    return chain
+
+
+def _is_retryable(exc) -> bool:
+    import urllib.error
+    if isinstance(exc, urllib.error.HTTPError):
+        # 404/410: the model id is wrong or retired (the old default
+        # llama-3.2-11b-vision-instruct 410s) — a fallback may answer.
+        # 400: bad payload, our bug. 401/403: bad key, same for every
+        # model. 429: per-account limit, shared by every model.
+        return exc.code >= 500 or exc.code in (404, 410)
+    return isinstance(exc, (TimeoutError, urllib.error.URLError,
+                            ConnectionError, OSError))
+
+
+def nim_call_fallback(messages, tools=None, timeout=30, model=None,
+                      role=None, max_attempts: int = 3):
+    """_nim_call with a model fallback chain. Returns (response,
+    model_used). Tries the configured model first, then each fallback
+    once, on retryable failures only. Raises the last exception when
+    every tried model fails, so callers keep their queued-retry /
+    error paths. max_attempts caps the chain (vision turns pass 2:
+    a 60 s timeout per model would otherwise take minutes)."""
+    last_exc = None
+    for m in _fallback_chain(model)[:max_attempts]:
+        try:
+            return _nim_call(messages, tools=tools, timeout=timeout,
+                             model=m, role=role), m
+        except Exception as e:
+            last_exc = e
+            if not _is_retryable(e):
+                raise
+            print(f"NIM fallback: {m} failed ({str(e)[:60]}), "
+                  f"trying next model", flush=True)
+    raise last_exc
+
+
 JSON_INSTRUCTION = ("Reply with ONLY minified JSON, no prose: "
                     f'{{"summary": str, "category": one of {CATEGORIES}, '
                     '"reminders": [{"text": str, "due_at": iso}] or [], '
@@ -259,7 +312,7 @@ def _json_turn(raw_content: str, system_msg: dict, model=None, role=None):
     """Strict-JSON completion (no tools). Returns (summary, category,
     reminders, memories) or (None,...) on failure."""
     try:
-        fb = _nim_call([
+        fb, _used = nim_call_fallback([
             {"role": "system", "content": JSON_INSTRUCTION},
             {"role": "user", "content": raw_content},
         ], model=model, role=role)
@@ -285,7 +338,8 @@ def _process_json(messages, raw_content: str, user_content, model=None,
             {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
             image_part,
         ]}]
-        fb = _nim_call(message, timeout=60, model=model, role=role)  # vision turns queue on the free tier, but 60 s is the fail-fast cap
+        fb, _used = nim_call_fallback(message, timeout=60, model=model, role=role,
+                                      max_attempts=2)  # vision turns queue on the free tier, but 60 s is the fail-fast cap
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -480,16 +534,19 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
         reminders, memories = [], []
         for _turn in range(2):
             try:
-                resp = _nim_call(messages, tools=tools, model=model, role=role)
+                resp, _used = nim_call_fallback(messages, tools=tools,
+                                                model=model, role=role)
                 msg = resp["choices"][0]["message"]
             except Exception as e:  # network / 5xx / rate-limit — retry-once later
                 if summary:  # a write already landed; do not lose it
                     break
                 # Name the model so the reply says which AI was attempted
                 # and that it timed out, instead of a bare "hiccup".
+                # (nim_call_fallback already tried the fallback chain,
+                # so this means every model failed.)
                 return {"ai_state": "queued-retry",
-                        "reply": f"saved (AI hiccup: {model or MODEL} — "
-                                 f"{str(e)[:60]} — will retry)"}
+                        "reply": f"saved (AI hiccup: {model or MODEL} "
+                                 f"(+ fallbacks) — {str(e)[:60]} — will retry)"}
             calls = msg.get("tool_calls") or []
             # Log each turn's tool choice: free models are flaky tool
             # callers, and this is the only way to tell a missed tool
