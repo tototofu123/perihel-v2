@@ -371,21 +371,42 @@ JSON_INSTRUCTION = ("Reply with ONLY minified JSON, no prose: "
 
 def _json_turn(raw_content: str, system_msg: dict, model=None, role=None):
     """Strict-JSON completion (no tools). Returns (summary, category,
-    reminders, memories) or (None,...) on failure."""
-    try:
-        fb, _used = nim_call_fallback([
-            {"role": "system", "content": JSON_INSTRUCTION},
-            {"role": "user", "content": raw_content},
-        ], model=model, role=role)
-        text = fb["choices"][0]["message"]["content"].strip()
-        start, end = text.find("{"), text.rfind("}")
-        parsed = json.loads(text[start:end + 1])
+    reminders, memories) or (None,...) on failure. A call that returns
+    unparseable content (Ultra sometimes answers the JSON turn with
+    empty content — seen live 2026-11-09, twice in six captures) is
+    retried once on the first fallback model, which answers in <1 s;
+    a transport failure is not retried here because
+    nim_call_fallback already ran the whole chain. Failures are
+    logged with the reason instead of failing silently, so the
+    journal shows whether the model or the network gave up."""
+    candidates = []
+    for m in (model, FALLBACK_MODELS[0] if FALLBACK_MODELS else None):
+        if m not in candidates:
+            candidates.append(m)
+    for attempt_model in candidates:
+        try:
+            fb, _used = nim_call_fallback([
+                {"role": "system", "content": JSON_INSTRUCTION},
+                {"role": "user", "content": raw_content},
+            ], model=attempt_model, role=role)
+        except Exception as e:
+            print(f"JSON turn call failed (model={attempt_model}): "
+                  f"{str(e)[:120]}", flush=True)
+            return None, None, [], []
+        text = ""
+        try:
+            text = (fb["choices"][0]["message"]["content"] or "").strip()
+            start, end = text.find("{"), text.rfind("}")
+            parsed = json.loads(text[start:end + 1])
+        except Exception as e:
+            print(f"JSON turn unparseable (model={attempt_model}): "
+                  f"{str(e)[:80]} text={text[:120]!r}", flush=True)
+            continue
         return (parsed.get("summary"),
                 parsed.get("category"),
                 [(r["text"], _fix_due_at(r["due_at"])) for r in parsed.get("reminders", [])],
                 [(m["key"], m["value"]) for m in parsed.get("memories", [])])
-    except Exception:
-        return None, None, [], []
+    return None, None, [], []
 
 
 def _process_json(messages, raw_content: str, user_content, model=None,
