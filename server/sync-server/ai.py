@@ -156,6 +156,55 @@ TOOLS = [
 READ_TOOLS = ("search_web", "fetch_url", "reminder_list",
               "reminder_cancel", "memory_search")
 
+# One-line instruction per tool, used to build the system prompt for
+# exactly the tools sent in this turn (see _select_tools).
+TOOL_DOCS = {
+    "capture_update": "capture_update — expand the thought: what they meant, the context, why it might matter.",
+    "reminder_create": "reminder_create — ONLY when the thought names a time, deadline or occasion.",
+    "memory_write": "memory_write — when the thought reveals a durable fact about the user's life, studies, projects or routines.",
+    "search_web": "search_web — when the thought asks about something current or unknown (news, facts, what happened). Answer from the results, never invent.",
+    "fetch_url": "fetch_url — when a linked page or a search result has the detail the snippets lack.",
+    "reminder_list": "reminder_list — when they ask what reminders they have or what is due.",
+    "reminder_cancel": "reminder_cancel — ONLY when they ask to cancel or delete a reminder.",
+    "memory_search": "memory_search — when they ask what they said, thought or decided before.",
+}
+_TOOLS_BY_NAME = {t["function"]["name"]: t for t in TOOLS}
+
+# Keyword routing: the free models call tools reliably with 3 tools and
+# a short prompt (verified 2026-11-09: Laguna/Bolt called tools in the
+# 3-tool test) but ignore them with 8 tools and a long prompt (Ultra,
+# Laguna and Bolt all fell back to JSON on /v1/chat with 8 tools).
+# So each turn gets only the tools that could apply to this message.
+_SEARCH_WORDS = ("news", "latest", "today", "weather", "price", "what is",
+                 "what's", "whats", "who is", "how many", "how much",
+                 "happened", "http://", "https://")
+_REMINDER_WORDS = ("reminder", "remind me", "reminders")
+_RECALL_WORDS = ("what did i", "did i say", "remember", "said before",
+                 "thought about", "earlier", "last week", "yesterday")
+
+
+def _select_tools(content: str) -> list:
+    """Tools for one capture: the 3 write tools always, plus the read
+    tools whose keywords appear in the message. At most 5 tools, so the
+    prompt stays short enough for the small free models to actually
+    call them."""
+    text = (content or "").lower()
+    names = ["capture_update", "reminder_create", "memory_write"]
+    if any(w in text for w in _SEARCH_WORDS):
+        names += ["search_web"]
+        if "http://" in text or "https://" in text:
+            names.append("fetch_url")
+    if any(w in text for w in _REMINDER_WORDS):
+        names += ["reminder_list", "reminder_cancel"]
+    if any(w in text for w in _RECALL_WORDS):
+        names.append("memory_search")
+    seen, out = set(), []
+    for n in names[:5]:
+        if n not in seen:
+            seen.add(n)
+            out.append(_TOOLS_BY_NAME[n])
+    return out
+
 
 def _db():
     conn = sqlite3.connect(os.path.join(DATA_DIR, "sync.db"), timeout=10)
@@ -364,14 +413,7 @@ def _execute_read_tool(fn: str, args: dict, model=None, role=None) -> str | None
 
 SYSTEM_PROMPT = """You are Perihel, the user's thought companion. The user sends raw, fleeting thoughts. Process each one:
 
-1. capture_update — expand the thought: what they meant, the context, why it might matter.
-2. reminder_create — ONLY when the thought names a time, deadline or occasion.
-3. memory_write — when the thought reveals a durable fact about the user's life, studies, projects or routines.
-4. search_web — when the thought asks about something current or unknown (news, facts, what happened). Answer from the results, never invent.
-5. fetch_url — when a linked page or a search result has the detail the snippets lack.
-6. reminder_list — when they ask what reminders they have or what is due.
-7. reminder_cancel — ONLY when they ask to cancel or delete a reminder.
-8. memory_search — when they ask what they said, thought or decided before.
+{tools}
 
 What you know about the user so far:
 {memory}
@@ -379,6 +421,15 @@ What you know about the user so far:
 Current time: {now}
 
 Call your tools now (all applicable ones, in parallel). Do not reply with prose. If you used a search/fetch/list tool, use its results in your next reply — do not ask the user to look it up themselves."""
+
+
+def _system_prompt(tools: list, conn) -> str:
+    """System prompt listing only the tools sent in this turn, so the
+    model is never told about a tool it cannot call."""
+    doc = "\n".join(f"{i + 1}. {TOOL_DOCS[t['function']['name']]}"
+                    for i, t in enumerate(tools))
+    return SYSTEM_PROMPT.format(tools=doc, memory=_memory_block(conn),
+                                now=now_utc())
 
 
 def process_capture(uuid: str, thumb_data_uri: str | None = None,
@@ -404,8 +455,9 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
              "factor what you see into the summary and category.)"},
             {"type": "image_url", "image_url": {"url": thumb_data_uri}},
         ]
+    tools = _select_tools(row["content"])
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(memory=_memory_block(conn), now=now_utc())},
+        {"role": "system", "content": _system_prompt(tools, conn)},
         {"role": "user", "content": user_content},
     ]
     conn.close()
@@ -428,7 +480,7 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
         reminders, memories = [], []
         for _turn in range(2):
             try:
-                resp = _nim_call(messages, tools=TOOLS, model=model, role=role)
+                resp = _nim_call(messages, tools=tools, model=model, role=role)
                 msg = resp["choices"][0]["message"]
             except Exception as e:  # network / 5xx / rate-limit — retry-once later
                 if summary:  # a write already landed; do not lose it
