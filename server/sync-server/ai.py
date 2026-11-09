@@ -4,8 +4,12 @@ Runs ON the VM but no inference happens here: this module only orchestrates
 HTTP calls to integrate.api.nvidia.com. Rate-limited (min gap between calls)
 and retry-once semantics live here too.
 
-Tool protocol: one model turn with parallel tool calls. If the model returns
-plain text instead of tool calls (unsupported/changed API), we fall back to a
+Tool protocol: up to two model turns with parallel tool calls. Write tools
+(capture_update / reminder_create / memory_write) finish the turn; read tools
+(search_web / fetch_url / reminder_list / reminder_cancel / memory_search)
+run immediately and their results go back to the model for a second turn,
+so it can answer questions using what it found. If the model returns plain
+text instead of tool calls (unsupported/changed API), we fall back to a
 strict-JSON prompt so processing still succeeds.
 """
 import json
@@ -113,7 +117,44 @@ TOOLS = [
             "key": {"type": "string"}, "value": {"type": "string"},
         }, "required": ["key", "value"]},
     }},
+    {"type": "function", "function": {
+        "name": "search_web",
+        "description": "Search the web when the user asks about something current or something you do not know (news, facts, prices, what happened). Returns titles, URLs and snippets.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "search query, e.g. 'Hong Kong weather today'"},
+            "max_results": {"type": "integer", "description": "1-5, default 5"},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "fetch_url",
+        "description": "Fetch a web page the user linked or that search_web returned, and read its text. Use it when the snippets are not enough to answer.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string", "description": "full http(s) URL to fetch"},
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "reminder_list",
+        "description": "List the user's pending reminders (text + due time). Use it when they ask what reminders they have, or what is due.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "reminder_cancel",
+        "description": "Cancel pending reminders matching the given text (e.g. 'call mom'). Use it only when the user asks to cancel / delete / drop a reminder.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "words from the reminder to cancel"},
+        }, "required": ["text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "memory_search",
+        "description": "Search the user's saved memories and past thoughts for a keyword (e.g. 'hiking', 'mom', a project name). Use it when they ask what they said, thought or decided before.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "keyword to search for"},
+        }, "required": ["query"]},
+    }},
 ]
+
+READ_TOOLS = ("search_web", "fetch_url", "reminder_list",
+              "reminder_cancel", "memory_search")
 
 
 def _db():
@@ -240,18 +281,104 @@ def _memory_block(conn) -> str:
     return "\n".join(f"- {r['key']}: {r['value']}" for r in rows)
 
 
+def _execute_read_tool(fn: str, args: dict, model=None, role=None) -> str | None:
+    """Run a read tool and return its result as text for the model, or
+    None when fn is not a read tool. Never raises: failures come back as
+    a short error string so the model can say so honestly instead of
+    the whole capture failing. Web tools are capped so one page cannot
+    flood the next model turn."""
+    try:
+        if fn == "search_web":
+            from search import search  # lazy: search.py is a sibling module
+            query = (args.get("query") or "").strip()
+            if not query:
+                return "search failed: empty query"
+            try:
+                n = int(args.get("max_results") or 5)
+            except (TypeError, ValueError):
+                n = 5
+            results = search(query, max_results=max(1, min(5, n)))
+            if not results:
+                return f"web search for '{query}' found nothing"
+            lines = [f"- {r['title']} ({r['url']}): {r['snippet']}"
+                     for r in results]
+            return "\n".join(lines)[:2000]
+        if fn == "fetch_url":
+            from search import fetch
+            url = (args.get("url") or "").strip()
+            if not url:
+                return "fetch failed: empty url"
+            return fetch(url, max_chars=4000) or "fetch returned no text"
+        if fn == "reminder_list":
+            conn = _db()
+            try:
+                rows = conn.execute(
+                    "SELECT text, due_at FROM reminders WHERE status = 'pending' "
+                    "ORDER BY due_at LIMIT 10").fetchall()
+            finally:
+                conn.close()
+            if not rows:
+                return "no pending reminders"
+            return "\n".join(f"- {r['text']} (due {r['due_at']})" for r in rows)
+        if fn == "reminder_cancel":
+            text = (args.get("text") or "").strip()
+            if not text:
+                return "cancel failed: empty text"
+            conn = _db()
+            try:
+                cur = conn.execute(
+                    "DELETE FROM reminders WHERE status = 'pending' "
+                    "AND text LIKE ?", (f"%{text}%",))
+                conn.commit()
+                n = cur.rowcount
+            finally:
+                conn.close()
+            return f"cancelled {n} reminder(s) matching '{text}'" if n else \
+                f"no pending reminder matched '{text}'"
+        if fn == "memory_search":
+            query = (args.get("query") or "").strip()
+            if not query:
+                return "search failed: empty query"
+            like = f"%{query}%"
+            conn = _db()
+            try:
+                mem = conn.execute(
+                    "SELECT key, value FROM memory WHERE key LIKE ? OR value LIKE ? "
+                    "LIMIT 10", (like, like)).fetchall()
+                caps = conn.execute(
+                    "SELECT content, ai_summary, created_at FROM captures "
+                    "WHERE deleted = 0 AND (content LIKE ? OR ai_summary LIKE ?) "
+                    "ORDER BY created_at DESC LIMIT 5", (like, like)).fetchall()
+            finally:
+                conn.close()
+            lines = [f"memory: {r['key']}: {r['value']}" for r in mem]
+            lines += [f"thought ({r['created_at'][:10]}): {r['content'][:120]}"
+                      + (f" — {r['ai_summary'][:120]}" if r['ai_summary'] else "")
+                      for r in caps]
+            return "\n".join(lines)[:2000] if lines else \
+                f"nothing found for '{query}'"
+    except Exception as e:
+        return f"{fn} failed: {str(e)[:120]}"
+    return None
+
+
 SYSTEM_PROMPT = """You are Perihel, the user's thought companion. The user sends raw, fleeting thoughts. Process each one:
 
 1. capture_update — expand the thought: what they meant, the context, why it might matter.
 2. reminder_create — ONLY when the thought names a time, deadline or occasion.
 3. memory_write — when the thought reveals a durable fact about the user's life, studies, projects or routines.
+4. search_web — when the thought asks about something current or unknown (news, facts, what happened). Answer from the results, never invent.
+5. fetch_url — when a linked page or a search result has the detail the snippets lack.
+6. reminder_list — when they ask what reminders they have or what is due.
+7. reminder_cancel — ONLY when they ask to cancel or delete a reminder.
+8. memory_search — when they ask what they said, thought or decided before.
 
 What you know about the user so far:
 {memory}
 
 Current time: {now}
 
-Call your tools now (all applicable ones, in parallel). Do not reply with prose."""
+Call your tools now (all applicable ones, in parallel). Do not reply with prose. If you used a search/fetch/list tool, use its results in your next reply — do not ask the user to look it up themselves."""
 
 
 def process_capture(uuid: str, thumb_data_uri: str | None = None,
@@ -293,28 +420,55 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
             return {"ai_state": "error", "reply": "saved (AI could not process the image — retry available)"}
         summary, category, reminders, memories = parsed
     else:
-        try:
-            resp = _nim_call(messages, tools=TOOLS, model=model, role=role)
-            msg = resp["choices"][0]["message"]
-        except Exception as e:  # network / 5xx / rate-limit — retry-once later
-            # Name the model so the reply says which AI was attempted and
-            # that it timed out, instead of a bare "hiccup".
-            return {"ai_state": "queued-retry",
-                    "reply": f"saved (AI hiccup: {model or MODEL} — "
-                             f"{str(e)[:60]} — will retry)"}
-
+        # Tool loop, at most 2 turns: write tools finish the turn, read
+        # tools run and their results go back for a second turn. The
+        # 30 s per-call cap plus the 5 s rate gap keeps a capture under
+        # the bot's 90 s reply window.
         summary = category = None
         reminders, memories = [], []
-
-        for call in msg.get("tool_calls") or []:
-            fn, args = call["function"]["name"], json.loads(call["function"]["arguments"] or "{}")
-            # Accept the old dotted names too, in case a model returns them.
-            if fn in ("capture_update", "capture.update"):
-                summary, category = args.get("summary"), args.get("category")
-            elif fn in ("reminder_create", "reminder.create"):
-                reminders.append((args.get("text", ""), _fix_due_at(args.get("due_at", ""))))
-            elif fn in ("memory_write", "memory.write"):
-                memories.append((args.get("key", ""), args.get("value", "")))
+        for _turn in range(2):
+            try:
+                resp = _nim_call(messages, tools=TOOLS, model=model, role=role)
+                msg = resp["choices"][0]["message"]
+            except Exception as e:  # network / 5xx / rate-limit — retry-once later
+                if summary:  # a write already landed; do not lose it
+                    break
+                # Name the model so the reply says which AI was attempted
+                # and that it timed out, instead of a bare "hiccup".
+                return {"ai_state": "queued-retry",
+                        "reply": f"saved (AI hiccup: {model or MODEL} — "
+                                 f"{str(e)[:60]} — will retry)"}
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                break
+            messages.append({"role": "assistant",
+                             "content": msg.get("content") or "",
+                             "tool_calls": calls})
+            read_used = False
+            for call in calls:
+                fn = call["function"]["name"]
+                try:
+                    args = json.loads(call["function"]["arguments"] or "{}")
+                except (ValueError, TypeError):
+                    args = {}
+                # Accept the old dotted names too, in case a model returns them.
+                if fn in ("capture_update", "capture.update"):
+                    summary, category = args.get("summary"), args.get("category")
+                elif fn in ("reminder_create", "reminder.create"):
+                    reminders.append((args.get("text", ""), _fix_due_at(args.get("due_at", ""))))
+                elif fn in ("memory_write", "memory.write"):
+                    memories.append((args.get("key", ""), args.get("value", "")))
+                elif fn in READ_TOOLS:
+                    read_used = True
+                    result = _execute_read_tool(fn, args, model=model, role=role)
+                    messages.append({"role": "tool",
+                                     "tool_call_id": call.get("id", fn),
+                                     "content": result or ""})
+            if summary or not read_used:
+                break
+            # read tools ran and no summary yet: one more turn so the
+            # model can answer from the results. If that turn fails, the
+            # loop's except above breaks to the JSON fallback.
 
         if not summary:  # model ignored tools — strict JSON fallback
             summary, category, reminders, memories = _json_turn(row["content"], messages[0],
