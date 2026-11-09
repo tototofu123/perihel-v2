@@ -12,10 +12,14 @@ so it can answer questions using what it found. If the model returns plain
 text instead of tool calls (unsupported/changed API), we fall back to a
 strict-JSON prompt so processing still succeeds.
 """
+import http.client
+import io
 import json
 import os
 import sqlite3
+import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -29,10 +33,24 @@ MODEL = os.environ.get("PERIHEL_AI_MODEL", "meta/llama-3.2-11b-vision-instruct")
 ROLES = ("bot", "worker", "default")
 DEFAULT_ROLE = "default"
 
-MIN_CALL_GAP_S = 5          # never hit the API more often than this, per role
+MIN_CALL_GAP_S = 2          # never hit the API more often than this, per role.
+# The free tier allows 40 req/min (one call per 1.5 s); 2 s = 30/min,
+# so there is margin and a 2-turn capture no longer burns 10 s just
+# sleeping between its own turns (measured baseline 2026-11-09: the
+# 5 s gap cost up to 10 s of a 29-37 s /v1/chat round-trip).
 RETRY_AFTER_S = 120         # retry-once window
 _last_call: dict[str, float] = {}   # role -> timestamp of its last NIM call
 _call_counts: dict[str, int] = {}   # role -> NIM calls made this process
+
+# One persistent HTTPS connection to the NIM endpoint, shared by all
+# threads (the server is ThreadingHTTPServer, so http.client objects
+# must never be used concurrently — the lock serialises every call).
+# urllib opens a fresh TCP+TLS handshake per request (~0.3-1 s each);
+# reusing the connection keeps that cost to once per server lifetime.
+# A stale connection (server-side idle close) fails fast and is
+# retried once on a fresh connection inside _nim_call, below.
+_nim_conn: http.client.HTTPSConnection | None = None
+_nim_conn_lock = threading.Lock()
 _key_cache: dict[str, str] = {}     # key filename -> key contents (hits only;
                                     # a miss is never cached, so creating a
                                     # key file while the server runs works)
@@ -216,17 +234,48 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _nim_post(body: dict, headers: dict, timeout: int) -> dict:
+    """One POST to the NIM endpoint over the shared persistent
+    connection. Raises urllib.error.HTTPError on a non-200 status (so
+    _is_retryable keeps working on .code) and the underlying
+    connection error on a transport failure. A stale connection is
+    retried once on a fresh one; anything else propagates."""
+    global _nim_conn
+    payload = json.dumps(body).encode()
+    for attempt in range(2):
+        if _nim_conn is None:
+            _nim_conn = http.client.HTTPSConnection(
+                "integrate.api.nvidia.com", timeout=timeout)
+        try:
+            _nim_conn.request("POST", "/v1/chat/completions",
+                              body=payload, headers=headers)
+            resp = _nim_conn.getresponse()
+            data = resp.read()
+        except (ConnectionError, http.client.HTTPException, OSError):
+            _nim_conn.close()
+            _nim_conn = None
+            if attempt == 0:
+                continue
+            raise
+        if resp.status == 200:
+            return json.loads(data.decode())
+        raise urllib.error.HTTPError(
+            NIM_URL, resp.status, resp.reason,
+            dict(resp.getheaders()), io.BytesIO(data))
+
+
 def _nim_call(messages, tools=None, timeout=30, model=None, role=None):
     """Single NIM request honoring the per-role rate limit. Returns the
     response JSON. model overrides the global MODEL for this one call
     (the Telegram bot passes PERIHEL_BOT_MODEL); None means the server
     default. role picks the key file and the rate limiter (see
     get_nim_key); None/unknown means the default role. Each call is
-    logged with its role and the running per-role count, so usage is
-    visible in the server log. Timeout is 30 s on purpose: a model that
-    has not answered in 30 s is not going to (it is queued or the key
-    lacks the entitlement), so fail fast and let the caller retry
-    later instead of leaving the user waiting for minutes."""
+    logged with its role, model, per-role count and milliseconds, so
+    latency is visible in the server log. Timeout is 30 s on purpose:
+    a model that has not answered in 30 s is not going to (it is
+    queued or the key lacks the entitlement), so fail fast and let the
+    caller retry later instead of leaving the user waiting for
+    minutes."""
     role = validate_role(role)
     wait = MIN_CALL_GAP_S - (time.time() - _last_call.get(role, 0.0))
     if wait > 0:
@@ -236,16 +285,16 @@ def _nim_call(messages, tools=None, timeout=30, model=None, role=None):
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
-    req = urllib.request.Request(
-        NIM_URL, data=json.dumps(body).encode(), method="POST",
-        headers={"Authorization": f"Bearer {get_nim_key(role)}",
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        out = json.loads(r.read().decode())
+    headers = {"Authorization": f"Bearer {get_nim_key(role)}",
+               "Content-Type": "application/json"}
+    t0 = time.time()
+    with _nim_conn_lock:
+        out = _nim_post(body, headers, timeout)
+    ms = int((time.time() - t0) * 1000)
     _last_call[role] = time.time()
     _call_counts[role] = _call_counts.get(role, 0) + 1
     print(f"NIM call: role={role} model={body['model']} "
-          f"calls_for_role={_call_counts[role]}", flush=True)
+          f"calls_for_role={_call_counts[role]} ms={ms}", flush=True)
     return out
 
 
@@ -540,7 +589,7 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
     else:
         # Tool loop, at most 2 turns: write tools finish the turn, read
         # tools run and their results go back for a second turn. The
-        # 30 s per-call cap plus the 5 s rate gap keeps a capture under
+        # 30 s per-call cap plus the 2 s rate gap keeps a capture under
         # the bot's 90 s reply window.
         summary = category = None
         reminders, memories = [], []
