@@ -12,6 +12,7 @@ so it can answer questions using what it found. If the model returns plain
 text instead of tool calls (unsupported/changed API), we fall back to a
 strict-JSON prompt so processing still succeeds.
 """
+import base64
 import http.client
 import io
 import json
@@ -26,6 +27,20 @@ from datetime import datetime, timezone
 DATA_DIR = os.environ.get("PERIHEL_SYNC_DIR", "/opt/perihel-sync")
 NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 MODEL = os.environ.get("PERIHEL_AI_MODEL", "meta/llama-3.2-11b-vision-instruct")
+
+# Vision model chain (issue #1). The old default vision model,
+# meta/llama-3.2-11b-vision-instruct, reached end of life on 2026-11-05 and
+# now answers 410, while the text fallbacks cannot see the image at all.
+# Vision therefore keeps its own chain: the 90B Llama vision model answers
+# the strict-JSON prompt directly (~10 s, 30 output tokens); Nemotron VL is
+# the backup but is a reasoning model, so it only helps when it finishes
+# inside max_tokens. Override with PERIHEL_VISION_MODEL /
+# PERIHEL_VISION_FALLBACKS.
+VISION_MODEL = os.environ.get("PERIHEL_VISION_MODEL",
+                              "meta/llama-3.2-90b-vision-instruct")
+VISION_FALLBACKS = [m.strip() for m in os.environ.get(
+    "PERIHEL_VISION_FALLBACKS",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b").split(",") if m.strip()]
 
 # Roles — each may have its own NVIDIA key (see get_nim_key). The role
 # picks the KEY and the rate limiter; it does NOT pick the model (the
@@ -420,8 +435,29 @@ def _process_json(messages, raw_content: str, user_content, model=None,
             {"type": "text", "text": JSON_INSTRUCTION + "\n\nUser thought: " + text_part},
             image_part,
         ]}]
-        fb, _used = nim_call_fallback(message, timeout=60, model=model, role=role,
-                                      max_attempts=2)  # vision turns queue on the free tier, but 60 s is the fail-fast cap
+        vision_chain = [model or VISION_MODEL]
+        vision_chain += [m for m in VISION_FALLBACKS if m not in vision_chain]
+        fb = None
+        last_exc = None
+        for m in vision_chain[:2]:  # 60 s per model keeps the turn under 2 min
+            try:
+                fb = _nim_call(message, timeout=60, model=m, role=role)
+            except Exception as e:
+                last_exc = e
+                if not _is_retryable(e):
+                    raise
+                print(f"vision turn: {m} failed ({str(e)[:60]}), "
+                      f"trying next model", flush=True)
+                continue
+            if (fb["choices"][0]["message"].get("content") or "").strip():
+                break  # a reasoning model can burn max_tokens and return null
+            last_exc = ValueError(f"{m} returned no content")
+            print(f"vision turn: {m} returned no content, "
+                  f"trying next model", flush=True)
+            fb = None
+        if fb is None:
+            raise last_exc or ValueError("no vision model answered")
+        # vision turns queue on the free tier, but 60 s is the fail-fast cap
         text = fb["choices"][0]["message"]["content"].strip()
         start, end = text.find("{"), text.rfind("}")
         parsed = json.loads(text[start:end + 1])
@@ -431,7 +467,13 @@ def _process_json(messages, raw_content: str, user_content, model=None,
                 [(m["key"], m["value"]) for m in parsed.get("memories", [])])
     except Exception as e:
         import traceback
-        print(f"vision turn failed: {e}\n{traceback.format_exc()[-400:]}", flush=True)
+        body = ""
+        if isinstance(e, urllib.error.HTTPError):
+            try:
+                body = e.read().decode()[:300]
+            except Exception:
+                pass
+        print(f"vision turn failed: {e} {body}\n{traceback.format_exc()[-400:]}", flush=True)
         return None
 
 
@@ -568,6 +610,27 @@ def _system_prompt(tools: list, conn) -> str:
                                 now=now_utc())
 
 
+def _thumb_from_media(row) -> str | None:
+    """Rebuild a vision thumb from the stored media file, so tick retries and
+    the retry-AI button can actually see the image (the client thumb only
+    rides on the synchronous chat call). Skips files too big for a turn."""
+    try:
+        media_id = row["media_id"]
+    except (IndexError, KeyError):
+        return None
+    if not media_id:
+        return None
+    path = os.path.join(DATA_DIR, "media", media_id)
+    if not os.path.isfile(path) or os.path.getsize(path) > 4 * 1024 * 1024:
+        return None
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "webp": "image/webp"}.get(media_id.rsplit(".", 1)[-1].lower())
+    if not mime:
+        return None
+    with open(path, "rb") as f:
+        return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
+
+
 def process_capture(uuid: str, thumb_data_uri: str | None = None,
                     model: str | None = None, role: str | None = None) -> dict:
     """Run AI over one capture. Writes results, returns {ai_state, reply}.
@@ -578,18 +641,21 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
     "worker", "default"); None/unknown means the default role. The
     role does not pick the model — that is the separate `model` arg."""
     conn = _db()
-    row = conn.execute("SELECT content, content_type, ai_attempts FROM captures WHERE uuid = ?", (uuid,)).fetchone()
+    row = conn.execute(
+        "SELECT content, content_type, ai_attempts, media_id FROM captures WHERE uuid = ?",
+        (uuid,)).fetchone()
     if row is None:
         conn.close()
         return {"ai_state": "error", "reply": "capture vanished"}
 
+    thumb = thumb_data_uri or _thumb_from_media(row)
     user_content = row["content"]
-    if thumb_data_uri and row["content_type"] in ("image", "video"):
+    if thumb and row["content_type"] in ("image", "video"):
         # vision turn: describe what is attached alongside the user's words
         user_content = [
             {"type": "text", "text": f"{user_content}\n(An image is attached — "
              "factor what you see into the summary and category.)"},
-            {"type": "image_url", "image_url": {"url": thumb_data_uri}},
+            {"type": "image_url", "image_url": {"url": thumb}},
         ]
     tools = _select_tools(row["content"])
     messages = [
@@ -600,7 +666,7 @@ def process_capture(uuid: str, thumb_data_uri: str | None = None,
 
     # Vision turns: the vision endpoints reject the `tools` parameter, so
     # images take the strict-JSON path directly instead of tool calling.
-    vision = thumb_data_uri and isinstance(user_content, list)
+    vision = thumb is not None and isinstance(user_content, list)
     if vision:
         parsed = _process_json(messages, row["content"], user_content, model=model,
                                role=role)
