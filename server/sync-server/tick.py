@@ -164,6 +164,31 @@ def purge_deleted(conn):
     conn.commit()
 
 
+def check_budget_fallback(conn):
+    """Once a day: create the Monitoring fallback alert the moment the
+    billing metric exists. The descriptor only appears after the first
+    billable usage, so before that this is one GET that returns nothing.
+    Runs as the VM service account via the metadata server: no secret."""
+    today = now_utc()[:10]
+    if setting(conn, "budget_alert_check_date") == today:
+        return
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                 ("budget_alert_check_date", today))
+    conn.commit()
+    try:
+        import budget_fallback
+        result = budget_fallback.ensure_policy()
+    except Exception as e:
+        print(f"budget fallback check failed: {e}", flush=True)
+        return
+    if result["state"] == "created":
+        print(f"budget fallback alert created: {result['name']}", flush=True)
+        push("Perihel budget fallback live",
+             f"Monitoring alert policy {result['name']} created: actual spend "
+             "over HK$0.005 now stops the VM even if the budget's own Pub/Sub "
+             "notification fails.", ["warning"])
+
+
 def main():
     conn = db()
     try:
@@ -171,6 +196,7 @@ def main():
         fire_reminders(conn)   # explicit user reminders — any hour
         send_nudges(conn)      # smart nudges — active hours only
         purge_deleted(conn)
+        check_budget_fallback(conn)  # daily, creates the alert after 1st spend
     finally:
         conn.close()
 

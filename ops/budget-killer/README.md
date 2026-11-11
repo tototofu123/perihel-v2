@@ -17,8 +17,8 @@ from there.
 
 - `budget-fallback-alert.json` — the alert policy as the Monitoring
   API expects it.
-- `create-fallback-alert.py` — creates it. Run on a machine with
-  gcloud logged in (the Windows machine is fine):
+- `create-fallback-alert.py` — creates it from a machine with gcloud
+  logged in (the Windows machine is fine):
 
   ```powershell
   python ops/budget-killer/create-fallback-alert.py
@@ -33,5 +33,16 @@ from there.
   with the same display name already exists, so it is safe to run
   daily.
 
+**It also creates itself.** `tick.py` runs once a minute on the VM, and
+`server/sync-server/budget_fallback.py` checks once a day whether the
+metric descriptor exists; the first day after billable usage starts it
+creates the policy through the VM's service account (metadata token,
+no secret) and pushes a notification. So the fallback becomes live
+without anyone remembering to run the script. Run
+`python3 /opt/perihel-sync/budget_fallback.py` on the VM to see the
+current state (`{'state': 'no_metric'}` until first spend).
+
 Creating the policy needs the Monitoring API enabled and a role that
 can create alert policies (e.g. `roles/monitoring.alertPolicyEditor`).
+The VM's service account already has `roles/editor` and the
+`monitoring.write` scope, which is enough.
