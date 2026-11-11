@@ -1,20 +1,31 @@
 package com.tototofu.perihel
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,9 +70,6 @@ class Config(ctx: Context) {
     var token: String
         get() = prefs.getString("token", BuildConfig.DEFAULT_TOKEN) ?: ""
         set(v) = prefs.edit().putString("token", v).apply()
-    var aiEnabled: Boolean
-        get() = prefs.getBoolean("ai_enabled", true)  // default AI ON
-        set(v) = prefs.edit().putBoolean("ai_enabled", v).apply()
 
     // chat history survives app restarts (last 100 messages, JSON in prefs)
     fun loadChat(): List<ChatMsg> = try {
@@ -79,6 +87,33 @@ class Config(ctx: Context) {
                 .put("extra", it.extra))
         }
         prefs.edit().putString("chat", arr.toString()).apply()
+    }
+
+    // thoughts captured while the server was down, waiting to sync (cap 10)
+    fun loadPending(): List<SyncApi.PendingSend> = try {
+        val arr = org.json.JSONArray(prefs.getString("pending", "[]"))
+        (0 until arr.length()).map {
+            val o = arr.getJSONObject(it)
+            SyncApi.PendingSend(
+                o.getString("uuid"), o.getString("text"),
+                if (o.isNull("thumb")) null else o.optString("thumb"),
+                o.optString("created_at"),
+                if (o.isNull("ai_summary")) null else o.optString("ai_summary"),
+                if (o.isNull("category")) null else o.optString("category"))
+        }
+    } catch (_: Exception) { emptyList() }
+
+    fun savePending(list: List<SyncApi.PendingSend>) {
+        val arr = org.json.JSONArray()
+        list.takeLast(10).forEach { p ->
+            arr.put(org.json.JSONObject()
+                .put("uuid", p.uuid).put("text", p.text)
+                .put("thumb", p.thumbDataUri ?: org.json.JSONObject.NULL)
+                .put("created_at", p.createdAt)
+                .put("ai_summary", p.aiSummary ?: org.json.JSONObject.NULL)
+                .put("category", p.category ?: org.json.JSONObject.NULL))
+        }
+        prefs.edit().putString("pending", arr.toString()).apply()
     }
 
     val isConfigured: Boolean get() = url.isNotBlank() && token.isNotBlank()
@@ -159,10 +194,47 @@ fun SetupScreen(config: Config, onDone: () -> Unit) {
 
 // ---------------- tab 1: chat ----------------
 
-data class ChatMsg(val who: String, val text: String, val extra: String = "")
+data class ChatMsg(val who: String, val text: String, val extra: String = "",
+                   val image: Bitmap? = null)  // image previews are session-only
+
+/** A photo picked from the gallery, ready to attach: raw bytes for upload,
+ * a downscaled base64 thumbnail for the vision model, and the preview bitmap. */
+data class PendingImage(val bytes: ByteArray, val filename: String,
+                        val thumbDataUri: String, val preview: Bitmap)
+
+/** Decode the picked uri down to ~1280px so the vision turn stays light. */
+suspend fun prepareImage(ctx: Context, uri: Uri): PendingImage? =
+    withContext(Dispatchers.IO) {
+        try {
+            val resolver = ctx.contentResolver
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1280) sample *= 2
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp = resolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, opts)
+            } ?: return@withContext null
+            val baos = java.io.ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
+            val bytes = baos.toByteArray()
+            PendingImage(
+                bytes = bytes,
+                filename = "photo-${System.currentTimeMillis()}.jpg",
+                thumbDataUri = "data:image/jpeg;base64," +
+                    Base64.encodeToString(bytes, Base64.NO_WRAP),
+                preview = bmp)
+        } catch (e: Exception) {
+            android.util.Log.e("SyncApi", "image decode failed", e)
+            null
+        }
+    }
 
 @Composable
 fun ChatTab(config: Config, onDisconnect: () -> Unit) {
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var messages by remember {
         mutableStateOf(config.loadChat().ifEmpty {
@@ -172,23 +244,49 @@ fun ChatTab(config: Config, onDisconnect: () -> Unit) {
     }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<PendingImage?>(null) }
+    var attachNote by remember { mutableStateOf("") }
+
+    val pickImage = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            attachNote = "preparing image…"
+            scope.launch {
+                pending = prepareImage(ctx, uri)
+                attachNote = if (pending != null) "" else "couldn't load that image"
+            }
+        }
+    }
 
     fun append(msg: ChatMsg) {
         messages = messages + msg
         config.saveChat(messages)
     }
 
+    // flush anything queued while the server was down
+    LaunchedEffect(Unit) {
+        val queue = config.loadPending()
+        if (queue.isNotEmpty()) {
+            scope.launch {
+                val flushed = withContext(Dispatchers.IO) {
+                    try { SyncApi.flushPending(config.url, config.token, queue); true }
+                    catch (e: Exception) {
+                        android.util.Log.e("SyncApi", "pending flush failed", e); false
+                    }
+                }
+                if (flushed) {
+                    config.savePending(emptyList())
+                    append(ChatMsg("perihel",
+                        "synced ${queue.size} offline thought${if (queue.size == 1) "" else "s"} to the logbook"))
+                }
+            }
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("Perihel", fontSize = 20.sp, color = Accent, modifier = Modifier.weight(1f))
-            Text("AI", fontSize = 12.sp, color = if (config.aiEnabled) DoneGreen else Dim)
-            Switch(
-                checked = config.aiEnabled,
-                onCheckedChange = { config.aiEnabled = it },
-                modifier = Modifier.padding(start = 6.dp).height(28.dp),
-                colors = SwitchDefaults.colors(checkedTrackColor = Accent),
-            )
             TextButton(onClick = onDisconnect) { Text("server", fontSize = 11.sp, color = Dim) }
         }
 
@@ -206,6 +304,13 @@ fun ChatTab(config: Config, onDisconnect: () -> Unit) {
                                 vertical = if (mine) 10.dp else 2.dp)
                             .widthIn(max = 320.dp),
                     ) {
+                        msg.image?.let {
+                            Image(it.asImageBitmap(), "photo",
+                                Modifier.fillMaxWidth().heightIn(max = 220.dp)
+                                    .clip(RoundedCornerShape(10.dp)),
+                                contentScale = ContentScale.Crop)
+                            Spacer(Modifier.height(4.dp))
+                        }
                         Text(msg.text, fontSize = 15.sp,
                             color = if (mine) Color.Unspecified else Color(0xFFD6D6E0),
                             lineHeight = 20.sp)
@@ -222,43 +327,89 @@ fun ChatTab(config: Config, onDisconnect: () -> Unit) {
             }
         }
 
+        pending?.let { p ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Image(p.preview.asImageBitmap(), "attached photo",
+                    Modifier.height(72.dp).clip(RoundedCornerShape(10.dp)),
+                    contentScale = ContentScale.Crop)
+                Spacer(Modifier.width(8.dp))
+                Text(attachNote.ifEmpty { "image attached" }, fontSize = 11.sp,
+                    color = Dim, modifier = Modifier.weight(1f))
+                TextButton(onClick = { pending = null }) { Text("✕", fontSize = 12.sp, color = Dim) }
+            }
+        }
+
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { if (!busy) pickImage.launch("image/*") },
+                enabled = !busy) {
+                Text("📎", fontSize = 18.sp)
+            }
             OutlinedTextField(input, { input = it },
                 placeholder = { Text("capture a thought…", fontSize = 14.sp) },
                 modifier = Modifier.weight(1f), maxLines = 4, enabled = !busy)
             Spacer(Modifier.width(8.dp))
             Button(onClick = {
                 val text = input.trim()
-                if (text.isNotEmpty() && !busy) {
+                val img = pending
+                if ((text.isNotEmpty() || img != null) && !busy) {
                     input = ""
+                    pending = null
                     busy = true
-                    append(ChatMsg("you", text))
+                    append(ChatMsg("you", text.ifEmpty { "(photo)" }, image = img?.preview))
                     scope.launch {
                         var result: SyncApi.ChatResult? = null
-                        var error: String? = null
+                        var offlineReply: Pair<String, String>? = null
+                        var offlineQueued = false
                         try {
                             result = withContext(Dispatchers.IO) {
-                                SyncApi.chat(config.url, config.token, text, config.aiEnabled)
+                                var media: org.json.JSONObject? = null
+                                if (img != null) {
+                                    val up = SyncApi.uploadMedia(
+                                        config.url, config.token, img.bytes, img.filename)
+                                    media = org.json.JSONObject()
+                                        .put("id", up.getString("id"))
+                                        .put("size", up.optInt("size", img.bytes.size))
+                                        .put("kind", up.optString("kind", "image"))
+                                        .put("thumb", img.thumbDataUri)
+                                }
+                                SyncApi.chat(config.url, config.token, text, true, media)
                             }
                         } catch (e: Exception) {
-                            android.util.Log.e("SyncApi", "chat failed", e)
-                            error = e.message ?: e.toString()
+                            android.util.Log.e("SyncApi", "chat failed — falling back to direct NIM", e)
+                        }
+                        if (result == null) {
+                            // Server unreachable: the thought is saved on the phone
+                            // FIRST (never lost), then AI still answers via direct NIM.
+                            offlineQueued = true
+                            val uuid = java.util.UUID.randomUUID().toString()
+                            val stamp = java.time.OffsetDateTime.now()
+                                .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                            offlineReply = NimApi.analyze(BuildConfig.DEFAULT_NIM_KEY,
+                                text, img?.thumbDataUri)
+                            val queue = config.loadPending() + SyncApi.PendingSend(
+                                uuid, text.ifEmpty { "(photo)" }, img?.thumbDataUri, stamp,
+                                offlineReply?.first, offlineReply?.second)
+                            config.savePending(queue)
                         }
                         busy = false
                         val reply = when {
-                            error != null -> "⚠ couldn't reach the server ($error) — the thought was NOT lost: tap sync in Logbook after reconnecting"
-                            result!!.aiState == "off" -> "saved to logbook (AI off)"
-                            result.aiState == "done" -> result.aiReply
-                            result.aiState == "retrying" -> result.aiReply
-                            else -> result.aiReply.ifEmpty { "saved to logbook (AI state: ${result.aiState})" }
+                            result?.aiState == "done" -> result.aiReply
+                            result != null -> result.aiReply.ifEmpty { "saved to logbook (AI state: ${result.aiState})" }
+                            offlineReply != null -> "offline — thought is safe on the phone and will sync when the server is back\n\n${offlineReply.first}"
+                            offlineQueued -> "offline — thought is safe on the phone and will sync when the server is back (offline AI unavailable)"
+                            else -> "⚠ couldn't reach the server — the thought is queued on the phone and will sync later"
                         }
                         val extra = buildString {
-                            result?.let { r ->
-                                if (!r.category.isNullOrEmpty()) append("category: ${r.category}")
-                                r.reminders.forEach { (_, d) ->
-                                    if (isNotEmpty()) append(" · ")
-                                    append("⏰ ${formatTime(d)}")
-                                }
+                            if (offlineQueued) append("queued on phone")
+                            val cat = result?.category ?: offlineReply?.second
+                            if (!cat.isNullOrEmpty()) {
+                                if (isNotEmpty()) append(" · ")
+                                append("category: $cat")
+                            }
+                            result?.reminders?.forEach { (_, d) ->
+                                if (isNotEmpty()) append(" · ")
+                                append("⏰ ${formatTime(d)}")
                             }
                         }
                         append(ChatMsg("perihel", reply, extra))
@@ -374,7 +525,8 @@ fun LogbookRow(cap: SyncApi.Capture, onToggle: () -> Unit, onDelete: () -> Unit,
                 else -> Accent
             }, CircleShape))
             Spacer(Modifier.width(8.dp))
-            Text(cap.content, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            Text(if (cap.contentType == "image") "🖼️ ${cap.content}" else cap.content,
+                fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 color = if (done) Dim else Color.Unspecified, modifier = Modifier.weight(1f))
             TextButton(onClick = onDelete) { Text("✕", fontSize = 12.sp, color = Dim) }
         }
@@ -430,7 +582,7 @@ fun AlertsTab(config: Config) {
             "active ${settings["active_start"] ?: "?"}–${settings["active_end"] ?: "?"} · " +
             "your explicit reminders fire any time",
             fontSize = 11.sp, color = Dim)
-        Text("pushes arrive via the ntfy app; this tab shows what's scheduled",
+        Text("pushes arrive via Telegram (@perihelcloudbot) or ntfy; this tab shows what's scheduled",
             fontSize = 10.sp, color = Dim)
         Spacer(Modifier.height(12.dp))
         Row {

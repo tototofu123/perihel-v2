@@ -47,6 +47,16 @@ object SyncApi {
 
     class AuthError : Exception("server rejected the token")
 
+    /** A thought captured while the server was unreachable, waiting to sync. */
+    data class PendingSend(
+        val uuid: String,
+        val text: String,
+        val thumbDataUri: String?,   // downscaled JPEG for upload + vision
+        val createdAt: String,
+        val aiSummary: String? = null,   // filled in when offline AI succeeded
+        val category: String? = null,
+    )
+
     fun health(url: String, token: String) {
         request(url.trimEnd('/') + "/v1/health", token, "GET")
     }
@@ -60,9 +70,12 @@ object SyncApi {
             .filterNot { it.deleted }  // soft-deleted hidden on clients
     }
 
-    /** Chat: save + AI in one call. `ai=false` just saves. */
-    fun chat(url: String, token: String, content: String, ai: Boolean): ChatResult {
+    /** Chat: save + AI in one call. `ai=false` just saves.
+     * `media` = {"id": …, "thumb": data-uri, "size": n, "kind": "image"} from uploadMedia. */
+    fun chat(url: String, token: String, content: String, ai: Boolean,
+             media: JSONObject? = null): ChatResult {
         val payload = JSONObject().put("content", content).put("ai", ai)
+        if (media != null) payload.put("media", media)
         val body = request(url.trimEnd('/') + "/v1/chat", token, "POST",
             payload.toString().toByteArray())
             ?: throw Exception("empty response")
@@ -111,6 +124,30 @@ object SyncApi {
             JSONObject().put("uuid", uuid).toString().toByteArray())
     }
 
+    /** Raw upload to /v1/media. Returns {"id", "size", "kind"} — pair with a
+     * downscaled base64 thumbnail in the chat call so the vision model can see it. */
+    fun uploadMedia(url: String, token: String, bytes: ByteArray, filename: String): JSONObject {
+        val u = url.trimEnd('/') + "/v1/media?filename=" +
+            java.net.URLEncoder.encode(filename, "UTF-8")
+        val conn = URL(u).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 120_000
+        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/octet-stream")
+        conn.setFixedLengthStreamingMode(bytes.size)
+        conn.outputStream.use { it.write(bytes) }
+        val code = conn.responseCode
+        if (code == 401) throw AuthError()
+        if (code !in 200..299) {
+            val err = try { conn.errorStream?.bufferedReader()?.readText()?.take(200) } catch (_: Exception) { null }
+            Log.w(TAG, "POST $u -> $code $err")
+            throw Exception("HTTP $code uploading media")
+        }
+        return JSONObject(String(conn.inputStream.readBytes()))
+    }
+
     fun pullReminders(url: String, token: String): List<Reminder> {
         val body = request(url.trimEnd('/') + "/v1/reminders", token, "GET")
             ?: throw Exception("empty response")
@@ -135,6 +172,34 @@ object SyncApi {
             payload.toString().toByteArray())
     }
 
+    /** Flush the phone's offline queue: upload queued images, then push each
+     * capture (plain upsert — the server's AI queue does not run on these,
+     * so the offline-computed summary/category travel with the row). */
+    fun flushPending(url: String, token: String, items: List<PendingSend>) {
+        for (p in items) {
+            val cap = JSONObject().apply {
+                put("uuid", p.uuid)
+                put("content", p.text)
+                put("content_type", if (p.thumbDataUri != null) "image"
+                    else if (p.text.lowercase().startsWith("http")) "url" else "text")
+                put("status", "pending")
+                put("created_at", p.createdAt)
+                put("updated_at", p.createdAt)
+                if (p.thumbDataUri != null) {
+                    val bytes = android.util.Base64.decode(
+                        p.thumbDataUri.substringAfter("base64,"), android.util.Base64.NO_WRAP)
+                    val up = uploadMedia(url, token, bytes, "offline-${p.uuid}.jpg")
+                    put("media_id", up.getString("id"))
+                    put("media_type", up.optString("kind", "image"))
+                    put("media_size", up.optInt("size", bytes.size))
+                }
+                if (!p.aiSummary.isNullOrEmpty()) put("ai_summary", p.aiSummary)
+                if (!p.category.isNullOrEmpty()) put("category", p.category)
+            }
+            postCaptures(url, token, cap)
+        }
+    }
+
     private fun parse(o: JSONObject) = Capture(
         uuid = o.getString("uuid"),
         content = o.optString("content", ""),
@@ -155,7 +220,7 @@ object SyncApi {
         val conn = URL(urlStr).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.connectTimeout = 15_000
-        conn.readTimeout = 120_000  // chat waits on the AI call
+        conn.readTimeout = 300_000  // chat waits on the AI call; vision turns can take 240s
         conn.setRequestProperty("Authorization", "Bearer $token")
         if (body != null) {
             conn.doOutput = true
@@ -170,12 +235,7 @@ object SyncApi {
             Log.w(TAG, "$method $urlStr -> $code $err")
             throw Exception("HTTP $code from server")
         }
-        // Read the body for every method. POST used to return null here,
-        // so chat() (which parses the /v1/chat JSON reply) always threw
-        // "empty response" and the AI reply never rendered — even though
-        // the capture itself was saved server-side. Callers that do not
-        // need a body (softDelete, retryAi, postCaptures) simply ignore
-        // the return value.
+        // POST bodies matter too: /v1/chat and /v1/media answer with JSON.
         return conn.inputStream.readBytes()
     }
 
