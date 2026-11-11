@@ -170,7 +170,13 @@ object SyncApi {
             Log.w(TAG, "$method $urlStr -> $code $err")
             throw Exception("HTTP $code from server")
         }
-        return if (method == "POST") null else conn.inputStream.readBytes()
+        // Read the body for every method. POST used to return null here,
+        // so chat() (which parses the /v1/chat JSON reply) always threw
+        // "empty response" and the AI reply never rendered — even though
+        // the capture itself was saved server-side. Callers that do not
+        // need a body (softDelete, retryAi, postCaptures) simply ignore
+        // the return value.
+        return conn.inputStream.readBytes()
     }
 
     private fun nowRfc3339(): String =
