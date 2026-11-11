@@ -15,9 +15,10 @@ android {
         versionCode = 1
         versionName = "1.0"
         // optional: build with your server baked in:
-        //   ./gradlew assembleDebug -PPERIHEL_URL=... -PPERIHEL_TOKEN=...
+        //   ./gradlew assembleDebug -PPERIHEL_URL=... -PPERIHEL_TOKEN=... -PPERIHEL_NIM_KEY=...
         buildConfigField("String", "DEFAULT_URL", "\"${project.findProperty("PERIHEL_URL") ?: ""}\"")
         buildConfigField("String", "DEFAULT_TOKEN", "\"${project.findProperty("PERIHEL_TOKEN") ?: ""}\"")
+        buildConfigField("String", "DEFAULT_NIM_KEY", "\"${project.findProperty("PERIHEL_NIM_KEY") ?: ""}\"")
     }
 
     buildTypes {
